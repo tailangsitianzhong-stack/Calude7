@@ -1080,8 +1080,9 @@ def build_rig(colls):
         ik.roll = h.roll
         ik = bone(f"ik_foot.{side}", f.head, f.tail, "root", deform=False)
         ik.roll = f.roll
-        kn = eb[f"shin.{side}"].head
-        bone(f"pole_knee.{side}", kn + Vector((0, -0.5, 0)), kn + Vector((0, -0.6, 0)), "hips", deform=False)
+        hp_ = eb[f"thigh.{side}"].head
+        # 膝の向き:股関節の真正面・膝の高さに置く(外側に置くとガニ股になる)
+        bone(f"pole_knee.{side}", Vector((hp_.x, -1.0, H["knee"])), Vector((hp_.x, -1.1, H["knee"])), "hips", deform=False)
     bpy.ops.object.mode_set(mode="OBJECT")
 
     for side in ("R", "L"):
@@ -1092,20 +1093,27 @@ def build_rig(colls):
         c.target, c.subtarget = arm, f"ik_hand.{side}"
         c = pb[f"shin.{side}"].constraints.new("IK")
         c.target, c.subtarget, c.chain_count = arm, f"ik_foot.{side}", 2
-        # 膝は常に前へ:ポール角は休止姿勢の膝位置が保たれる値を選ぶ
         c.pole_target, c.pole_subtarget = arm, f"pole_knee.{side}"
-        rest = arm.data.bones[f"shin.{side}"].head_local
-        best = None
-        for ang in (-90, 90, 0, 180):
-            c.pole_angle = math.radians(ang)
-            bpy.context.view_layer.update()
-            err = (pb[f"shin.{side}"].head - rest).length
-            if best is None or err < best[0]:
-                best = (err, ang)
-        c.pole_angle = math.radians(best[1])
         c = pb[f"foot.{side}"].constraints.new("COPY_ROTATION")
         c.target, c.subtarget = arm, f"ik_foot.{side}"
+    # ポール角の較正:深く膝を曲げた姿勢で、膝が股関節と足首を結ぶ線の真上(正面)に来る角度を選ぶ
     RIG = arm
+    pose_rig(arm, hips=(0, 0, -0.30), foot_L=(-0.08, 0, 0), foot_R=(0.08, 0, 0))
+    for side in ("L", "R"):
+        c = pb[f"shin.{side}"].constraints["IK"]
+        best = None
+        for deg in range(-180, 180, 5):
+            c.pole_angle = math.radians(deg)
+            bpy.context.view_layer.update()
+            hip, knee, ank = pb[f"thigh.{side}"].head, pb[f"shin.{side}"].head, pb[f"foot.{side}"].head
+            mid = (hip + ank) / 2
+            err = abs(knee.x - mid.x) + (10 if knee.y > mid.y else 0)
+            if best is None or err < best[0]:
+                best = (err, deg)
+        c.pole_angle = math.radians(best[1])
+        print(f"[samurai] pole angle {side} = {best[1]} deg (knee offset {best[0]*100:.1f} cm)")
+    pose_rig(arm)
+    bpy.context.view_layer.update()
 
     # カーブ(紐・縁取り)をメッシュ化して変形できるように
     objs = [o for c in colls for o in c.objects]
