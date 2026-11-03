@@ -77,9 +77,11 @@ button:focus-visible { outline: 2px solid var(--kin); outline-offset: 3px; }
 @media (pointer: coarse) { .touch { display: block; } .keys { display: none; } }
 .stick { position: absolute; left: max(24px, env(safe-area-inset-left, 0px)); bottom: calc(env(safe-area-inset-bottom, 0px) + 28px); width: 132px; height: 132px; border-radius: 50%; border: 1px solid rgba(239,230,210,.35); background: rgba(20,19,19,.25); pointer-events: auto; }
 .stick i { position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px; border-radius: 50%; background: rgba(239,230,210,.5); }
-.btns { position: absolute; right: max(18px, env(safe-area-inset-right, 0px)); bottom: calc(env(safe-area-inset-bottom, 0px) + 22px); display: grid; grid-template-columns: repeat(3, 62px); gap: 10px; pointer-events: auto; }
-.btns button { width: 62px; height: 62px; border-radius: 50%; border: 1px solid rgba(239,230,210,.45); background: rgba(20,19,19,.45); color: var(--paper); font-family: var(--display); font-weight: 800; font-size: 15px; }
+.btns { position: absolute; right: max(18px, env(safe-area-inset-right, 0px)); bottom: calc(env(safe-area-inset-bottom, 0px) + 22px); display: grid; grid-template-columns: repeat(4, 56px); gap: 10px; pointer-events: auto; }
+.btns button { width: 56px; height: 56px; border-radius: 50%; border: 1px solid rgba(239,230,210,.45); background: rgba(20,19,19,.45); color: var(--paper); font-family: var(--display); font-weight: 800; font-size: 15px; }
 .btns button.k { background: rgba(184,50,42,.75); }
+.lock { position: absolute; transform: translate(-50%, -50%); width: 26px; height: 26px; border: 2px solid var(--kin); border-radius: 50%; box-shadow: 0 0 0 3px rgba(20,19,19,.35); }
+.lock::after { content: ""; position: absolute; inset: 9px; background: var(--shu); border-radius: 50%; }
 @media (prefers-reduced-motion: reduce) { .call, .pop, .bar i, .bar b { transition: none; } }
 </style>
 
@@ -98,8 +100,9 @@ button:focus-visible { outline: 2px solid var(--kin); outline-offset: 3px; }
     </div>
   </div>
   <div class="call" id="call"></div>
+  <div class="lock" id="lock" hidden></div>
   <div class="keys">
-    <span><kbd>W A S D</kbd>間合い</span><span><kbd>Shift</kbd>走る</span>
+    <span><kbd>W A S D</kbd>移動</span><span><kbd>マウス</kbd>視点</span><span><kbd>Shift</kbd>走る</span><span><kbd>Q</kbd>構え(ロックオン)</span>
     <span><kbd>J</kbd>袈裟斬り</span><span><kbd>K</kbd>横薙ぎ</span><span><kbd>L</kbd>唐竹割り</span>
     <span><kbd>Space</kbd>回避</span><span><kbd>C</kbd>しゃがむ(長押し)</span>
   </div>
@@ -108,7 +111,7 @@ button:focus-visible { outline: 2px solid var(--kin); outline-offset: 3px; }
 <div class="touch" id="touch">
   <div class="stick" id="stick"><i id="knob"></i></div>
   <div class="btns">
-    <button data-k="crouch">屈</button><button data-k="dodge">避</button><button data-k="run">走</button>
+    <button data-k="lock">構</button><button data-k="crouch">屈</button><button data-k="dodge">避</button><button data-k="run">走</button>
     <button class="k" data-k="diag">袈裟</button><button class="k" data-k="horiz">横</button><button class="k" data-k="over">縦</button>
   </div>
 </div>
@@ -128,7 +131,7 @@ button:focus-visible { outline: 2px solid var(--kin); outline-offset: 3px; }
     </div>
     <button class="go" id="go" disabled>いざ、勝負</button>
     <div class="load" id="load">読み込み中 0%</div>
-    <div class="note">横薙ぎはしゃがんでかわせます。唐竹割りと袈裟斬りは回避で見切ってください。刀同士が同時に当たると鍔迫り合いになります。<br>情景は『二天記』などの伝承によります（日時・武器ともに諸説あり）。</div>
+    <div class="note">島の中は浜も浅瀬も自由に歩けます。視点はマウス(クリックで固定、Escで解除)かドラッグで回し、Qで小次郎に構えます。横薙ぎはしゃがんでかわせます。唐竹割りと袈裟斬りは回避で見切ってください。刀同士が同時に当たると鍔迫り合いになります。<br>情景は『二天記』などの伝承によります（日時・武器ともに諸説あり）。</div>
   </div>
 </div>
 
@@ -342,7 +345,9 @@ ridge(780, 4.1, 70, [[-500, 300, 220], [150, 180, 160], [-1200, 220, 260]], '#42
 // ------------------------------------------------------------------ 浜の小物:黒松・岩・武蔵の舟・投げ捨てられた鞘
 const pineBark = new THREE.MeshStandardMaterial({ color: '#4a3828', roughness: 0.95 });
 const pineNeedle = new THREE.MeshStandardMaterial({ color: '#253a22', roughness: 0.9, flatShading: true });
+const COLLIDERS = [];
 function pine(x, z, s, lean) {
+  COLLIDERS.push({ x: x + lean.x * 0.3, z: z + lean.y * 0.3, r: 0.45 * s });
   const g = new THREE.Group();
   const y0 = islandH(x, z);
   const pts = [new THREE.Vector3(0, -0.3, 0), new THREE.Vector3(lean.x * 0.6, 2.2 * s, lean.y * 0.6),
@@ -379,6 +384,7 @@ function rock(x, z, s) {
   const m = new THREE.Mesh(geo, rockMat); m.scale.setScalar(s);
   m.position.set(x, islandH(x, z) + 0.1 * s, z); m.rotation.y = Math.random() * 6;
   m.castShadow = m.receiveShadow = true; scene.add(m);
+  COLLIDERS.push({ x, z, r: 0.9 * s });
 }
 for (let i = 0; i < 34; i++) {
   const a = Math.random() * Math.PI * 2;
@@ -410,6 +416,8 @@ function shorePoint(angle, h = 0.08) {
   const oar = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.04, 3.1), wood); oar.position.set(0.3, 0.5, 0.2); oar.rotation.y = 0.15; boat.add(oar);
   const sp = shorePoint(0.55, -0.12);
   boat.position.copy(sp); boat.lookAt(0, sp.y, 0); boat.rotateZ(0.12);
+  const bf = new THREE.Vector3(0, 0, 1).applyQuaternion(boat.quaternion);
+  for (const k of [-1.6, 0, 1.6]) COLLIDERS.push({ x: sp.x + bf.x * k, z: sp.z + bf.z * k, r: 0.85 });
   scene.add(boat);
 }
 // 小次郎が投げ捨てた鞘
@@ -531,7 +539,12 @@ const ATK = {
   horiz: { clip: 'Slash_Horizontal', speed: 1.5,  a0: 14, a1: 23, end: 33, dmg: 17, arc: 110, lunge: [8, 17, 0.35], name: '横薙ぎ', horiz: true },
   over:  { clip: 'Slash_Overhead',   speed: 1.25, a0: 13, a1: 19, end: 33, dmg: 30, arc: 50, lunge: [9, 16, 0.6], name: '唐竹割り' },
 };
-const ARENA = 13;
+const WADE = -0.5;  // 膝まで浸かれる深さまで歩ける
+function walkable(x, z) {
+  if (islandH(x, z) < WADE) return false;
+  for (const c of COLLIDERS) if ((x - c.x) ** 2 + (z - c.z) ** 2 < (c.r + 0.3) ** 2) return false;
+  return true;
+}
 
 class Fighter {
   constructor(gltf, opts) {
@@ -609,6 +622,7 @@ class Fighter {
     if (this.state === 'dead' || (this.busy && this.state !== 'attack')) return false;
     if (this.state === 'attack') { if (this.frame() > ATK[this.atk.type].a1) this.queued = type; return false; }
     const A = ATK[type];
+    if (this.foe && this.pos.distanceTo(this.foe.pos) < 5) this.yaw = Math.atan2(this.foe.pos.x - this.pos.x, this.foe.pos.z - this.pos.z);
     this.state = 'attack'; this.atk = { type, hit: false, swished: false };
     this.play(A.clip, { once: true, speed: A.speed, fade: 0.08 });
     this.onAttack?.(type);
@@ -659,44 +673,59 @@ class Fighter {
       if (!this.crouchHeld && this.cur.paused) { this.cur.paused = false; this.cur.time = 30 / FPS; }
       if (f >= 40) { this.state = 'idle'; this.play('Idle', { fade: 0.2 }); }
     }
-    if (this.knock) { this.pos.addScaledVector(this.knock, dt); this.knock.multiplyScalar(Math.pow(0.02, dt)); if (this.knock.length() < 0.05) this.knock = null; }
+    if (this.knock) { this.tryMove(this.knock.clone().multiplyScalar(dt)); this.knock.multiplyScalar(Math.pow(0.02, dt)); if (this.knock.length() < 0.05) this.knock = null; }
 
-    // 移動(相手に向いたまま間合いを測る)
+    // 移動:move.dir はワールド方向。ロックオン中は相手を向いたまま、そうでなければ進む方向を向く
+    let moveYaw = null;
     if (!this.busy && this.state !== 'dead') {
-      const len = Math.hypot(move.x, move.y);
+      const len = Math.min(1, move.dir.length());
       if (len > 0.05) {
-        const fwd = this.forward(), right = new THREE.Vector3(-fwd.z, 0, fwd.x);
-        const sp = move.run ? 4.0 : 1.7;
-        const dir = fwd.clone().multiplyScalar(move.y).add(right.multiplyScalar(move.x)).normalize();
-        this.pos.addScaledVector(dir, sp * Math.min(1, len) * dt);
+        const dir = move.dir.clone().setY(0).normalize();
+        const depth = -islandH(this.pos.x, this.pos.z);
+        let sp = (move.run ? 4.0 : 1.7) * len;
+        if (depth > 0) sp *= 1 - Math.min(depth, 0.5) * 1.1;   // 潮に足を取られる
+        this.tryMove(dir.clone().multiplyScalar(sp * dt));
         this.state = 'move';
-        const back = move.y < -0.3;
+        moveYaw = Math.atan2(dir.x, dir.z);
+        const back = move.lock && dir.dot(this.forward()) < -0.3;
         if (move.run && !back) this.play('Run', { speed: 1.2 }); else this.play('Walk', { speed: back ? -1.3 : 1.3 });
         this.stepT = (this.stepT || 0) + dt * (move.run ? 2.6 : 1.4);
-        if (this.stepT > 1) { this.stepT = 0; sfx('step'); }
+        if (this.stepT > 1) {
+          this.stepT = 0; sfx('step');
+          if (depth > 0.03) burst(this.pos.clone().setY(0.02), 8, '#e8f2f2', 1.8, 0.03, 0.5, -7);
+        }
       } else {
         this.state = 'idle'; this.play('Idle', { fade: 0.25 });
       }
     }
-    // 間合いの下限・浜の範囲
-    const d = this.pos.distanceTo(foe.pos);
-    if (d < 1.1 && foe.state !== 'dead') {
-      const push = this.pos.clone().sub(foe.pos).setY(0).normalize().multiplyScalar((1.1 - d) * 0.5);
-      this.pos.add(push);
-    }
-    const r = Math.hypot(this.pos.x, this.pos.z);
-    if (r > ARENA) this.pos.multiplyScalar(ARENA / r);
+    // 相手とは重ならない
+    const toFoe = foe.pos.clone().sub(this.pos).setY(0);
+    const d = toFoe.length();
+    if (d < 1.1 && foe.state !== 'dead') this.tryMove(toFoe.clone().normalize().multiplyScalar(-(1.1 - d) * 0.5));
     this.pos.y = islandH(this.pos.x, this.pos.z);
     if (this.state !== 'dead') {
-      const want = Math.atan2(foe.pos.x - this.pos.x, foe.pos.z - this.pos.z);
-      let dy = want - this.yaw; while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
-      this.yaw += dy * Math.min(1, dt * (this.state === 'attack' ? 4 : 9));
+      let want = null;
+      const foeYaw = Math.atan2(toFoe.x, toFoe.z);
+      if (move.lock || (this.state === 'attack' && d < 6)) want = foeYaw;
+      else if (moveYaw !== null) want = moveYaw;
+      if (want !== null) {
+        let dy = want - this.yaw; while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
+        this.yaw += dy * Math.min(1, dt * (this.state === 'attack' ? 4 : 10));
+      }
     }
     this.root.position.copy(this.pos);
     this.root.rotation.y = this.yaw;
     this.updateTrail();
   }
 
+  tryMove(delta) {
+    const x = this.pos.x + delta.x, z = this.pos.z + delta.z;
+    if (walkable(x, z)) { this.pos.x = x; this.pos.z = z; return true; }
+    if (walkable(x, this.pos.z)) { this.pos.x = x; return true; }   // 障害物に沿って滑る
+    if (walkable(this.pos.x, z)) { this.pos.z = z; return true; }
+    this.stuck = (this.stuck || 0) + 1;
+    return false;
+  }
   bladeWorld() {
     if (!this.blade) return null;
     return [this.blade.localToWorld(this.baseL.clone()), this.blade.localToWorld(this.tipL.clone())];
@@ -780,8 +809,9 @@ let diff = 1;
 const ai = { cd: 1.5, strafe: 1, strafeT: 0, pending: null, crouchT: 0 };
 function aiThink(dt, me, foe) {
   const D = DIFF[diff];
-  const move = { x: 0, y: 0, run: false };
+  const move = { dir: new THREE.Vector3(), run: false, lock: true };
   if (me.state === 'dead' || foe.state === 'dead') return move;
+  let mx = 0, my = 0;
   ai.cd -= dt; ai.strafeT -= dt;
   if (ai.strafeT <= 0) { ai.strafe = Math.random() < 0.5 ? -1 : 1; ai.strafeT = rand(1, 2.5); if (Math.random() < 0.25) ai.strafe = 0; }
   if (ai.pending) {
@@ -794,9 +824,13 @@ function aiThink(dt, me, foe) {
   if (me.state === 'crouch') { ai.crouchT -= dt; if (ai.crouchT <= 0) me.crouch(false); }
   const d = me.pos.distanceTo(foe.pos);
   const ideal = me.reach * 0.9;
-  if (d > ideal + 0.4) { move.y = 1; move.run = d > 6; }
-  else if (d < ideal - 0.7) move.y = -0.8;
-  else move.x = ai.strafe * 0.6;
+  if (d > ideal + 0.4) { my = 1; move.run = d > 5; }
+  else if (d < ideal - 0.7) my = -0.8;
+  else mx = ai.strafe * 0.6;
+  if (me.stuck > 20) { ai.strafe = -ai.strafe || 1; ai.strafeT = 1.2; me.stuck = 0; }
+  if (d > ideal + 0.4 && ai.strafeT > 0 && me.stuck) mx = ai.strafe;     // 松や岩を回り込む
+  const fwd = foe.pos.clone().sub(me.pos).setY(0).normalize(), right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+  move.dir.addScaledVector(fwd, my).addScaledVector(right, mx);
   if (ai.cd <= 0 && d < me.reach + 0.3 && !me.busy && Math.random() < D.aggro) {
     const r = Math.random();
     const type = foe.state === 'crouch' ? 'over' : (r < 0.45 ? 'diag' : r < 0.75 ? 'horiz' : 'over');
@@ -826,20 +860,56 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyL') player.attack('over');
   if (e.code === 'Space') { player.dodge(); e.preventDefault(); }
   if (e.code === 'KeyC' || e.code === 'ControlLeft') player.crouch(true);
+  if (e.code === 'KeyQ' || e.code === 'Tab') { toggleLock(); e.preventDefault(); }
 });
 addEventListener('keyup', (e) => {
   keys.delete(e.code);
   if (game === 'fight' && (e.code === 'KeyC' || e.code === 'ControlLeft')) player.crouch(false);
 });
 addEventListener('blur', () => keys.clear());
-function playerMove() {
+// 視点(カメラ)はキャラ操作と独立:マウス / 右側ドラッグ / 矢印キーで回す
+const cam = { yaw: 0, pitch: 0.32, dist: 4.6 };
+let lockOn = false;
+function toggleLock() {
+  lockOn = !lockOn;
+  $('lock').hidden = !lockOn;
+  pop(lockOn ? '構え' : '解く', player.head.getWorldPosition(new THREE.Vector3()), 'dodge');
+}
+function rotateCam(dx, dy) {
+  cam.yaw -= dx * 0.0042; cam.pitch = clamp(cam.pitch + dy * 0.0032, -0.12, 1.15);
+}
+const canvas = renderer.domElement;
+let dragId = null;
+canvas.addEventListener('pointerdown', (e) => {
+  if (game !== 'fight') return;
+  if (e.pointerType === 'mouse' && !document.pointerLockElement) {
+    try { const r = canvas.requestPointerLock?.(); r?.catch?.(() => {}); } catch {}
+  }
+  dragId = e.pointerId;
+});
+addEventListener('pointerup', (e) => { if (e.pointerId === dragId) dragId = null; });
+addEventListener('pointercancel', (e) => { if (e.pointerId === dragId) dragId = null; });
+addEventListener('pointermove', (e) => {
+  if (game !== 'fight') return;
+  if (document.pointerLockElement === canvas || e.pointerId === dragId) rotateCam(e.movementX, e.movementY);
+});
+canvas.addEventListener('wheel', (e) => { cam.dist = clamp(cam.dist + e.deltaY * 0.004, 2.4, 10); e.preventDefault(); }, { passive: false });
+
+function playerMove(dt) {
   let x = 0, y = 0;
-  if (keys.has('KeyW') || keys.has('ArrowUp')) y += 1;
-  if (keys.has('KeyS') || keys.has('ArrowDown')) y -= 1;
-  if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
-  if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
+  if (keys.has('KeyW')) y += 1;
+  if (keys.has('KeyS')) y -= 1;
+  if (keys.has('KeyA')) x -= 1;
+  if (keys.has('KeyD')) x += 1;
+  if (keys.has('ArrowLeft')) rotateCam(-260 * dt, 0);
+  if (keys.has('ArrowRight')) rotateCam(260 * dt, 0);
+  if (keys.has('ArrowUp')) rotateCam(0, -200 * dt);
+  if (keys.has('ArrowDown')) rotateCam(0, 200 * dt);
   x += touchMove.x; y += touchMove.y;
-  return { x: clamp(x, -1, 1), y: clamp(y, -1, 1), run: keys.has('ShiftLeft') || keys.has('ShiftRight') || touchRun };
+  const f = new THREE.Vector3(-Math.sin(cam.yaw), 0, -Math.cos(cam.yaw));   // カメラの向き(地面上)
+  const r = new THREE.Vector3(Math.cos(cam.yaw), 0, -Math.sin(cam.yaw));
+  const dir = f.multiplyScalar(clamp(y, -1, 1)).add(r.multiplyScalar(clamp(x, -1, 1)));
+  return { dir, run: keys.has('ShiftLeft') || keys.has('ShiftRight') || touchRun, lock: lockOn };
 }
 // touch stick + buttons
 {
@@ -858,7 +928,7 @@ function playerMove() {
     const k = b.dataset.k;
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault(); if (game !== 'fight') return;
-      if (k === 'run') touchRun = true; else if (k === 'crouch') player.crouch(true); else if (k === 'dodge') player.dodge(); else player.attack(k);
+      if (k === 'run') touchRun = true; else if (k === 'lock') toggleLock(); else if (k === 'crouch') player.crouch(true); else if (k === 'dodge') player.dodge(); else player.attack(k);
     });
     const up = () => { if (k === 'run') touchRun = false; if (k === 'crouch' && player) player.crouch(false); };
     b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('pointerleave', up);
@@ -884,17 +954,26 @@ function updateCamera(dt) {
     wantPos = new THREE.Vector3(mid.x + Math.cos(a) * r * 1.2, 2.4 + Math.sin(introT * 0.2) * 0.4, mid.z + Math.sin(a) * r);
     wantLook = mid.clone().setY(mid.y + 1.2);
   } else {
-    const dir = e.clone().sub(p).setY(0); const d = dir.length(); dir.normalize();
-    const side = new THREE.Vector3(-dir.z, 0, dir.x);
-    wantPos = p.clone().addScaledVector(dir, -(2.6 + d * 0.35)).addScaledVector(side, -(1.5 + d * 0.2)).setY(p.y + 1.75 + d * 0.12);
-    wantLook = mid.clone().setY(mid.y + 1.15);
+    const cp = Math.cos(cam.pitch);
+    wantLook = p.clone().setY(p.y + 1.35);
+    wantPos = wantLook.clone().add(new THREE.Vector3(Math.sin(cam.yaw) * cp, Math.sin(cam.pitch), Math.cos(cam.yaw) * cp).multiplyScalar(cam.dist));
+    wantPos.y = Math.max(wantPos.y, Math.max(islandH(wantPos.x, wantPos.z), 0) + 0.35);
+    const k2 = 1 - Math.pow(1e-6, dt);
+    camPos.lerp(wantPos, k2); camLook.lerp(wantLook, k2);
+    wantPos = camPos; wantLook = camLook;
   }
   const k = 1 - Math.pow(0.02, dt);
   camPos.lerp(wantPos, k); camLook.lerp(wantLook, k);
   camera.position.copy(camPos);
   if (shake > 0) { camera.position.add(new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).multiplyScalar(shake * 0.06)); shake = Math.max(0, shake - dt * 1.6); }
   camera.lookAt(camLook);
-  sun.position.copy(mid).addScaledVector(sunDir, 30); sun.target.position.copy(mid);
+  const focus = game === 'fight' ? p : mid;
+  sun.position.copy(focus).addScaledVector(sunDir, 30); sun.target.position.copy(focus);
+  if (lockOn && enemy.head) {
+    const v = enemy.head.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 0.45, 0)).project(camera);
+    const el = $('lock'); el.style.left = ((v.x + 1) / 2 * innerWidth) + 'px'; el.style.top = ((1 - v.y) / 2 * innerHeight) + 'px';
+    el.style.opacity = v.z < 1 ? 1 : 0;
+  }
 }
 
 // ------------------------------------------------------------------ boot
@@ -933,6 +1012,7 @@ loadModel().then((gltf) => {
   });
   // 武蔵の木刀には鍔も柄巻きもない:柄を素木に
   player.root.traverse((o) => { if (o.isMesh && /^Katana_(Tsuka|Kashira)/.test(o.name)) { o.visible = true; o.material.color.set('#7a5434'); } });
+  player.foe = enemy; enemy.foe = player;
   player.onAttack = (t) => aiOnPlayerAttack(t);
   player.onDeath = () => endRound(false);
   enemy.onDeath = () => endRound(true);
@@ -956,15 +1036,19 @@ function reset(f, start) {
 }
 function begin() {
   reset(player, player.opts.start); reset(enemy, enemy.opts.start); updateBars();
-  ai.cd = 1.8; ai.pending = null;
+  ai.cd = 1.8; ai.pending = null; lockOn = false; $('lock').hidden = true;
   $('title').hidden = true; $('hud').hidden = false;
   game = 'intro'; introT = 0; slowmo = 1;
   call('巌流島', '慶長十七年 四月十三日', 2.2);
-  setTimeout(() => { call('始め'); game = 'fight'; }, 2600);
+  setTimeout(() => {
+    call('始め'); game = 'fight';
+    const d = enemy.pos.clone().sub(player.pos); cam.yaw = Math.atan2(-d.x, -d.z); cam.pitch = 0.3; cam.dist = 4.6;
+  }, 2600);
 }
 function endRound(won) {
   if (game !== 'fight') return;
   game = 'over'; slowmo = 0.3;
+  if (document.pointerLockElement) document.exitPointerLock?.();
   call(won ? '一本' : '無念', '', 1.8);
   setTimeout(() => {
     slowmo = 1;
@@ -989,8 +1073,9 @@ function tick() {
   if (player) {
     let gdt = dt * slowmo;
     if (hitStop > 0) { hitStop -= dt; gdt *= 0.05; }
-    const pm = game === 'fight' ? playerMove() : { x: 0, y: 0 };
-    const em = game === 'fight' ? aiThink(gdt, enemy, player) : { x: 0, y: 0 };
+    const still = { dir: new THREE.Vector3(), run: false, lock: true };
+    const pm = game === 'fight' ? playerMove(dt) : still;
+    const em = game === 'fight' ? aiThink(gdt, enemy, player) : still;
     player.update(gdt, enemy, pm);
     enemy.update(gdt, player, em);
     if (game === 'fight') { resolve(player, enemy); resolve(enemy, player); }
