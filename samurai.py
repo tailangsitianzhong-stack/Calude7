@@ -1385,6 +1385,19 @@ def build_actions(arm):
         (40, st()),
     ]))
 
+    # ===== 緩急:tools/snappy_slash_easing.py で「溜め → 爆発的な初速 → 残心」を付ける
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("snappy", os.path.join(OUT_DIR, "tools", "snappy_slash_easing.py"))
+        snappy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(snappy)
+        for act in acts:                       # ここまでの 3 つが斬撃
+            assign_action(arm, act)
+            snappy.apply_snappy_slashing_easing(arm, start=10, end=18, strength=2.5, verbose=False)
+        print("[samurai] snappy easing applied to slashes")
+    except FileNotFoundError:
+        print("[samurai] tools/snappy_slash_easing.py not found; slashes keep smooth easing")
+
     # ===== 待機:低い構え、呼吸、重心のゆらぎ、切先のわずかな動き
     idle = []
     for f in range(0, 121, 10):
