@@ -45,14 +45,99 @@ def clear_scene():
                 coll.remove(block)
 
 
-def material(name, color, metallic=0.0, roughness=0.5):
+def _set(bsdf, names, value):
+    for n in names:
+        if n in bsdf.inputs:
+            bsdf.inputs[n].default_value = value
+            return
+
+
+def _rgba_io(mix):
+    a = [i for i in mix.inputs if i.type == "RGBA"]
+    return a[0], a[1], [o for o in mix.outputs if o.type == "RGBA"][0]
+
+
+def material(name, color, metallic=0.0, roughness=0.5, coat=0.0, sheen=0.0,
+             bump=None, scale=100.0, strength=0.15, var=0.0, var_scale=8.0):
+    """Principled BSDF + 任意でプロシージャルな凹凸(bump)と色ムラ(var)"""
     mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    bsdf = nodes.get("Principled BSDF")
     bsdf.inputs["Base Color"].default_value = (*color, 1.0)
     bsdf.inputs["Metallic"].default_value = metallic
     bsdf.inputs["Roughness"].default_value = roughness
+    _set(bsdf, ["Coat Weight", "Clearcoat"], coat)
+    _set(bsdf, ["Coat Roughness", "Clearcoat Roughness"], 0.06)
+    _set(bsdf, ["Sheen Weight", "Sheen"], sheen)
     mat.diffuse_color = (*color, 1.0)
+    if bump or var:
+        tc = nodes.new("ShaderNodeTexCoord")
+    if var:
+        nz = nodes.new("ShaderNodeTexNoise")
+        nz.inputs["Scale"].default_value = var_scale
+        nz.inputs["Detail"].default_value = 6
+        links.new(tc.outputs["Object"], nz.inputs["Vector"])
+        mix = nodes.new("ShaderNodeMix")
+        mix.data_type = "RGBA"
+        a, b, out = _rgba_io(mix)
+        a.default_value = (*(c * (1 - var) for c in color), 1)
+        b.default_value = (*(min(1, c * (1 + var)) for c in color), 1)
+        links.new(nz.outputs["Fac"], mix.inputs["Factor"])
+        links.new(out, bsdf.inputs["Base Color"])
+    if bump:
+        if bump == "voronoi":
+            tex = nodes.new("ShaderNodeTexVoronoi")
+            tex.feature = "SMOOTH_F1" if bump == "x" else "F1"
+            out = tex.outputs["Distance"]
+        elif bump == "wave":
+            tex = nodes.new("ShaderNodeTexWave")
+            tex.inputs["Distortion"].default_value = 2.0
+            out = tex.outputs["Fac"]
+        else:
+            tex = nodes.new("ShaderNodeTexNoise")
+            tex.inputs["Detail"].default_value = 10
+            out = tex.outputs["Fac"]
+        tex.inputs["Scale"].default_value = scale
+        links.new(tc.outputs["Object"], tex.inputs["Vector"])
+        bmp = nodes.new("ShaderNodeBump")
+        bmp.inputs["Strength"].default_value = strength
+        links.new(out, bmp.inputs["Height"])
+        links.new(bmp.outputs["Normal"], bsdf.inputs["Normal"])
+    return mat
+
+
+def kozane_material(name, c1, c2, lace, width=0.016, row=0.03):
+    """小札(こざね)を縅糸で綴じた板:Brick テクスチャで札と紐を表現"""
+    mat = material(name, c1, roughness=0.3, coat=0.8)
+    nodes, links = mat.node_tree.nodes, mat.node_tree.links
+    bsdf = nodes["Principled BSDF"]
+    tc = nodes.new("ShaderNodeTexCoord")
+    mp = nodes.new("ShaderNodeMapping")
+    mp.inputs["Rotation"].default_value = (math.radians(90), 0, 0)
+    br = nodes.new("ShaderNodeTexBrick")
+    br.offset = 0.0
+    br.inputs["Color1"].default_value = (*c1, 1)
+    br.inputs["Color2"].default_value = (*c2, 1)
+    br.inputs["Mortar"].default_value = (*lace, 1)
+    br.inputs["Scale"].default_value = 1.0
+    br.inputs["Mortar Size"].default_value = 0.0022
+    br.inputs["Mortar Smooth"].default_value = 0.3
+    br.inputs["Brick Width"].default_value = width
+    br.inputs["Row Height"].default_value = row
+    links.new(tc.outputs["Object"], mp.inputs["Vector"])
+    links.new(mp.outputs["Vector"], br.inputs["Vector"])
+    links.new(br.outputs["Color"], bsdf.inputs["Base Color"])
+    rr = nodes.new("ShaderNodeMapRange")
+    rr.inputs["To Min"].default_value = 0.28
+    rr.inputs["To Max"].default_value = 0.85
+    links.new(br.outputs["Fac"], rr.inputs["Value"])
+    links.new(rr.outputs["Result"], bsdf.inputs["Roughness"])
+    bmp = nodes.new("ShaderNodeBump")
+    bmp.inputs["Strength"].default_value = 0.35
+    bmp.invert = True
+    links.new(br.outputs["Fac"], bmp.inputs["Height"])
+    links.new(bmp.outputs["Normal"], bsdf.inputs["Normal"])
     return mat
 
 
@@ -179,26 +264,38 @@ def checker_material(name, c1, c2, scale=40.0):
 
 def build_materials():
     # 写真(幕末期の甲冑武者)の配色に合わせる
-    M["skin"] = material("Skin", (0.62, 0.45, 0.34), roughness=0.55)
+    M["skin"] = material("Skin", (0.62, 0.45, 0.34), roughness=0.5, bump="noise", scale=300, strength=0.05, var=0.08)
     M["hair"] = material("Hair", (0.02, 0.02, 0.02), roughness=0.4)
-    M["eye"] = material("Eye", (0.03, 0.02, 0.015), roughness=0.1)
-    M["under"] = material("Under_Kimono", (0.025, 0.025, 0.03), roughness=0.85)
-    M["jinbaori"] = material("Jinbaori_Brown", (0.13, 0.075, 0.045), roughness=0.8)
-    M["trim"] = material("Trim_Cream", (0.78, 0.68, 0.48), roughness=0.6)
-    M["lacquer_bk"] = material("Lacquer_Black", (0.018, 0.016, 0.014), roughness=0.25)
-    M["lacquer_br"] = material("Lacquer_Brown", (0.07, 0.04, 0.025), roughness=0.3)
-    M["lace"] = material("Odoshi_Dark", (0.035, 0.035, 0.05), roughness=0.8)
-    M["kusari"] = material("Kusari_Mail", (0.05, 0.05, 0.055), metallic=0.7, roughness=0.5)
-    M["cord"] = material("Cord_Cream", (0.82, 0.74, 0.56), roughness=0.75)
-    M["brass"] = material("Brass_Pale", (0.85, 0.76, 0.52), metallic=0.6, roughness=0.35)
+    M["eye"] = material("Eye", (0.03, 0.02, 0.015), roughness=0.05, coat=1.0)
+    M["under"] = material("Under_Kimono", (0.025, 0.025, 0.03), roughness=0.9, sheen=0.4,
+                          bump="wave", scale=900, strength=0.12, var=0.15)
+    M["jinbaori"] = material("Jinbaori_Wool", (0.13, 0.075, 0.045), roughness=0.85, sheen=0.6,
+                             bump="noise", scale=600, strength=0.15, var=0.18, var_scale=4)
+    M["trim"] = material("Trim_Cream", (0.72, 0.62, 0.44), roughness=0.7, sheen=0.4,
+                         bump="wave", scale=900, strength=0.1, var=0.1)
+    M["lacquer_bk"] = material("Lacquer_Black", (0.018, 0.016, 0.014), roughness=0.35, coat=1.0,
+                               bump="noise", scale=40, strength=0.03, var=0.2)
+    M["lacquer_br"] = material("Lacquer_Brown", (0.07, 0.04, 0.025), roughness=0.35, coat=1.0,
+                               bump="noise", scale=40, strength=0.03, var=0.25)
+    M["lace"] = material("Odoshi_Dark", (0.035, 0.035, 0.05), roughness=0.85, sheen=0.3,
+                         bump="wave", scale=600, strength=0.2)
+    M["kusari"] = material("Kusari_Mail", (0.06, 0.06, 0.065), metallic=0.85, roughness=0.45,
+                           bump="voronoi", scale=260, strength=0.8, var=0.3, var_scale=30)
+    M["cord"] = material("Cord_Silk", (0.78, 0.70, 0.52), roughness=0.55, sheen=0.6,
+                         bump="wave", scale=500, strength=0.4)
+    M["brass"] = material("Brass_Pale", (0.80, 0.70, 0.48), metallic=0.85, roughness=0.32,
+                          bump="noise", scale=200, strength=0.04, var=0.15)
     M["gold"] = material("Gold", (0.9, 0.7, 0.3), metallic=1.0, roughness=0.3)
-    M["tsuka"] = material("Tsuka_Ito", (0.04, 0.035, 0.03), roughness=0.8)
-    M["saya"] = material("Saya", (0.03, 0.025, 0.02), roughness=0.2)
-    M["sandal"] = material("Waraji_Straw", (0.55, 0.47, 0.30), roughness=0.95)
-    M["tabi"] = material("Tabi_Dark", (0.04, 0.04, 0.045), roughness=0.9)
-    M["paper"] = material("Fan_Paper", (0.92, 0.90, 0.85), roughness=0.7)
+    M["tsuka"] = material("Tsuka_Ito", (0.04, 0.035, 0.03), roughness=0.8, bump="wave", scale=300, strength=0.5)
+    M["saya"] = material("Saya", (0.03, 0.025, 0.02), roughness=0.25, coat=1.0, bump="noise", scale=60, strength=0.02)
+    M["sandal"] = material("Waraji_Straw", (0.55, 0.47, 0.30), roughness=0.95, bump="wave", scale=250, strength=0.6, var=0.2, var_scale=60)
+    M["tabi"] = material("Tabi_Dark", (0.04, 0.04, 0.045), roughness=0.9, sheen=0.3, bump="noise", scale=500, strength=0.1)
+    M["paper"] = material("Fan_Paper", (0.90, 0.88, 0.82), roughness=0.75, bump="noise", scale=150, strength=0.08, var=0.05)
     M["obi"] = checker_material("Obi_Check", (0.30, 0.24, 0.17), (0.12, 0.09, 0.07), 60)
-    M["ground"] = material("Ground", (0.30, 0.28, 0.25), roughness=0.95)
+    M["kozane_bk"] = kozane_material("Kozane_Black", (0.02, 0.018, 0.016), (0.03, 0.025, 0.02), (0.04, 0.04, 0.06))
+    M["kozane_br"] = kozane_material("Kozane_Brown", (0.075, 0.045, 0.028), (0.06, 0.035, 0.022), (0.04, 0.04, 0.06))
+    M["ground"] = material("Ground", (0.30, 0.28, 0.25), roughness=0.9, bump="noise", scale=6, strength=0.3, var=0.25, var_scale=2)
+    M["backdrop"] = material("Backdrop", (0.42, 0.38, 0.33), roughness=0.95, var=0.35, var_scale=0.8)
 
 
 def curve(name, pts, radius, mat, coll, smooth=True):
@@ -270,8 +367,8 @@ def build_body(coll):
             limb(f"Ikada_Upper.{side}.{t}", p - (b - a) * 0.06, p + (b - a) * 0.06, 0.066, 0.064, M["lacquer_br"], coll, verts=12)
         limb(f"Ikada_Fore.{side}", b.lerp(c, 0.2), b.lerp(c, 0.85), 0.054, 0.045, M["lacquer_bk"], coll, verts=8)
         d = (c - b).normalized()
-        limb(f"Hand.{side}", c, c + d * 0.10, 0.036, 0.028, M["skin"], coll, verts=16)
-        limb(f"Tekko.{side}", c - d * 0.005, c + d * 0.06, 0.040, 0.034, M["lacquer_bk"], coll, verts=8)
+        hand(side, c - d * 0.01, d, coll, curl=85 if side == "R" else 22,
+             roll=0 if side == "R" else -90, thumb=-1 if side == "R" else 1)
 
     # 脚:裁着袴(たっつけばかま)+脛当+足袋・草鞋、やや開いた立ち姿
     for s, side in ((-1, "R"), (1, "L")):
@@ -290,34 +387,137 @@ def build_body(coll):
                  Vector(an) + off * 0.050 + Vector((0, 0, 0.08)), 0.008, 0.008, M["lacquer_br"], coll, verts=6)
         cube(f"Tateage.{side}", (kn[0], kn[1] - 0.07, kn[2] + 0.01), (0.10, 0.015, 0.09),
              M["lacquer_br"], coll, bevel=0.006)
-        rz = s * math.radians(-15)
-        cube(f"Tabi.{side}", (an[0] + s * 0.02, -0.05, 0.035), (0.085, 0.24, 0.07), M["tabi"], coll,
-             rot=(0, 0, rz), bevel=0.025, smooth=True)
-        cube(f"Waraji.{side}", (an[0] + s * 0.02, -0.05, 0.006), (0.10, 0.26, 0.012), M["sandal"], coll,
-             rot=(0, 0, rz), bevel=0.004)
-        for t in (-0.05, 0.05):
-            cube(f"Waraji_Strap.{side}.{t}", (an[0] + s * 0.02, -0.05 + t, 0.05), (0.09, 0.012, 0.012),
-                 M["sandal"], coll, rot=(0, 0, rz))
-    return head
+        rz = s * math.radians(-12)
+        fwd = Vector((math.sin(-rz), -math.cos(-rz), 0))  # つま先方向(やや外向き)
+        ax, ay = an[0], an[1]
+        fp = []
+        fp.append(sphere(f"FootPart.{side}.ankle", (ax, ay, 0.085), (0.046, 0.05, 0.05), M["tabi"], coll))
+        fp.append(sphere(f"FootPart.{side}.heel", (ax, ay + 0.035, 0.040), (0.040, 0.045, 0.040), M["tabi"], coll))
+        mid = Vector((ax, ay, 0.0)) + fwd * 0.07
+        fp.append(cube(f"FootPart.{side}.arch", (mid.x, mid.y, 0.04), (0.085, 0.15, 0.06), M["tabi"], coll,
+                       rot=(math.radians(-8), 0, rz), bevel=0.02))
+        toe = Vector((ax, ay, 0.0)) + fwd * 0.17
+        fp.append(sphere(f"FootPart.{side}.toes", (toe.x, toe.y, 0.025), (0.045, 0.04, 0.024), M["tabi"], coll))
+        organic(f"Tabi.{side}", [o.name for o in fp], M["tabi"], coll, voxel=0.005)
+        limb(f"Kyahan.{side}", (ax, ay, 0.24), (ax, ay, 0.07), 0.052, 0.047, M["under"], coll)
+        sole = Vector((ax, ay, 0.0)) + fwd * 0.075
+        cube(f"Waraji.{side}", (sole.x, sole.y, 0.008), (0.10, 0.27, 0.014), M["sandal"], coll,
+             rot=(0, 0, rz), bevel=0.005, smooth=True)
+        for t in (0.0, 0.09):
+            q = Vector((ax, ay, 0.0)) + fwd * t
+            cube(f"Waraji_Strap.{side}.{t}", (q.x, q.y, 0.045 if t == 0 else 0.04), (0.10, 0.012, 0.012),
+                 M["sandal"], coll, rot=(math.radians(-20 if t else 0), 0, rz), bevel=0.004, smooth=True)
+    # 円柱の継ぎ目をなくし、布・鎖の腕脚を一体の有機的な形状に
+    for side in ("L", "R"):
+        organic(f"Arm_Mail.{side}", [f"Shoulder.{side}", f"UpperArm.{side}", f"Forearm.{side}"], M["kusari"], coll)
+        organic(f"Leg.{side}", [f"Thigh.{side}", f"Knee.{side}", f"Shin.{side}"], M["under"], coll)
+        organic(f"Hand.{side}", [o.name for o in coll.objects if o.name.startswith(f"HandPart.{side}")],
+                M["skin"], coll, voxel=0.0028, smooth=6)
+    organic("Head", ["Head", "Jaw", "Neck", "Ear.L", "Ear.R"], M["skin"], coll, voxel=0.004)
+    return bpy.data.objects["Head"]
+
+
+def organic(name, names, mat, coll, voxel=0.006, smooth=10):
+    objs = [bpy.data.objects[n] for n in names if n in bpy.data.objects]
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+    if len(objs) > 1:
+        bpy.ops.object.join()
+    o = bpy.context.active_object
+    o.name = name
+    o.data.name = name
+    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+    rm = o.modifiers.new("Remesh", "REMESH")
+    rm.mode = "VOXEL"
+    rm.voxel_size = voxel
+    sm = o.modifiers.new("Smooth", "CORRECTIVE_SMOOTH")
+    sm.iterations = smooth
+    sm.smooth_type = "LENGTH_WEIGHTED"
+    sm.use_only_smooth = True
+    for m in list(o.modifiers):
+        bpy.ops.object.modifier_apply(modifier=m.name)
+    o.data.materials.clear()
+    o.data.materials.append(mat)
+    for p in o.data.polygons:
+        p.use_smooth = True
+    return o
+
+
+def hand(side, wrist, d, coll, curl=30, roll=0.0, thumb=1):
+    """指付きの手。ローカル座標 X=指の並び, Y=指先方向, Z=手の甲"""
+    from mathutils import Matrix
+    up = Vector((0, 0, 1)) if abs(d.z) < 0.9 else Vector((1, 0, 0))
+    sx = d.cross(up).normalized()
+    nz = sx.cross(d).normalized()
+    q = Matrix.Rotation(math.radians(roll), 3, d)
+    nz = (q @ nz).normalized()
+    sx = d.cross(nz).normalized()
+    basis = Matrix((sx, d, nz)).transposed()
+
+    def W(v):
+        return Vector(wrist) + basis @ Vector(v)
+
+    parts = []
+    parts.append(sphere(f"HandPart.{side}.palm", (0, 0, 0), (0.042, 0.048, 0.016), M["skin"], coll))
+    pm = parts[-1]
+    pm.matrix_world = Matrix.Translation(W((0, 0.045, 0))) @ basis.to_4x4()
+    fingers = [(-0.027, 0.85, 0.0075), (-0.009, 1.0, 0.0082), (0.009, 1.05, 0.0083), (0.026, 0.95, 0.0080)]
+    for k, (x, ln, r) in enumerate(fingers):
+        x = x * -thumb
+        p = Vector((x, 0.088 - abs(x) * 0.3, 0.0))
+        dirv = Vector((x * 0.6, 1, 0)).normalized()
+        for j, seg in enumerate((0.044, 0.027, 0.022)):
+            ang = math.radians(curl * (j + 1) * 0.7)
+            dv = Vector((dirv.x, dirv.y * math.cos(ang), -math.sin(ang))).normalized()
+            q2 = p + dv * seg * ln
+            parts.append(limb(f"HandPart.{side}.f{k}{j}", W(p), W(q2), r * (1 - 0.1 * j), r * (0.9 - 0.1 * j),
+                              M["skin"], coll, verts=12))
+            parts.append(sphere(f"HandPart.{side}.k{k}{j}", W(q2), (r * 0.85,) * 3, M["skin"], coll, segs=12))
+            p = q2
+    t0 = Vector((thumb * 0.035, 0.015, -0.008))
+    t1 = t0 + Vector((thumb * 0.03, 0.03, -0.012))
+    t2 = t1 + Vector((thumb * 0.008, 0.032, -0.018 - curl * 0.0003))
+    parts.append(limb(f"HandPart.{side}.t0", W(t0), W(t1), 0.012, 0.010, M["skin"], coll, verts=12))
+    parts.append(limb(f"HandPart.{side}.t1", W(t1), W(t2), 0.0095, 0.008, M["skin"], coll, verts=12))
+    parts.append(sphere(f"HandPart.{side}.tk", W(t1), (0.010,) * 3, M["skin"], coll, segs=12))
+    parts.append(limb(f"HandPart.{side}.wrist", W((0, -0.03, 0)), W((0, 0.02, 0)), 0.030, 0.034, M["skin"], coll, verts=16))
+    # 手甲(てっこう)— 甲を覆う漆の板
+    tk = cube(f"Tekko.{side}", (0, 0, 0), (0.07, 0.07, 0.006), M["lacquer_bk"], coll, bevel=0.003)
+    tk.matrix_world = Matrix.Translation(W((0, 0.035, 0.019))) @ basis.to_4x4()
+    return parts
 
 
 # ---------------------------------------------------------------- clothing & armor
-def open_shell(name, rings, a0, a1, mat, coll, segs=40, thickness=0.008):
-    """前が開いた筒状の布(陣羽織)。a0→a1 は角度(度)の範囲"""
+def open_shell(name, rings, a0, a1, mat, coll, segs=160, thickness=0.008, sub=4):
+    """前が開いた筒状の布(陣羽織)。下へいくほど深くなるドレープのひだ付き"""
+    dense = []
+    for (z0, rx0, ry0), (z1, rx1, ry1) in zip(rings, rings[1:]):
+        for k in range(sub):
+            t = k / sub
+            dense.append((z0 + (z1 - z0) * t, rx0 + (rx1 - rx0) * t, ry0 + (ry1 - ry0) * t))
+    dense.append(rings[-1])
+    zmin = rings[0][0]
     verts, faces = [], []
     n = segs + 1
-    for z, rx, ry in rings:
+    for z, rx, ry in dense:
+        w = max(0.0, min(1.0, (1.30 - z) / (1.30 - zmin))) ** 1.3
         for i in range(n):
             a = math.radians(a0 + (a1 - a0) * i / segs)
-            verts.append((rx * math.cos(a), ry * math.sin(a), z))
-    for r in range(len(rings) - 1):
+            edge = min(i, segs - i) / 6.0
+            f = (0.045 * math.sin(11 * a + 0.4) + 0.02 * math.sin(23 * a + 1.7)) * w * min(1.0, edge)
+            hz_ = z + 0.012 * w * math.sin(7 * a)  # 裾の波打ち
+            verts.append((rx * (1 + f) * math.cos(a), ry * (1 + f) * math.sin(a),
+                          hz_ if z == zmin else z))
+    for r in range(len(dense) - 1):
         for i in range(segs):
             p = r * n + i
             faces.append((p, p + 1, p + 1 + n, p + n))
     o = mesh_from(name, verts, faces, mat, coll, thickness=thickness)
-    left = [verts[r * n] for r in range(len(rings))]
-    right = [verts[r * n + segs] for r in range(len(rings))]
-    hem = verts[:n]
+    left = [verts[r * n] for r in range(len(dense))][::sub] + [verts[(len(dense) - 1) * n]]
+    right = [verts[r * n + segs] for r in range(len(dense))][::sub] + [verts[(len(dense) - 1) * n + segs]]
+    hem = verts[:n:4] + [verts[segs]]
     return o, left, right, hem
 
 
@@ -352,7 +552,7 @@ def build_armor(coll):
             z = W - 0.10 - row * 0.055
             r = 1.0 + row * 0.07
             cube(f"Kusazuri.{k}.{row}", (cx * r, cy * r, z), (0.12, 0.012, 0.05),
-                 M["lacquer_bk"] if row % 2 == 0 else M["lacquer_br"], coll,
+                 M["kozane_bk"] if row % 2 == 0 else M["kozane_br"], coll,
                  rot=(math.radians(-12 if cy < 0 else 12), 0, ang + math.pi / 2), bevel=0.004)
 
     # 佩楯(はいだて)— 太腿前の小札の前掛け
@@ -372,7 +572,7 @@ def build_armor(coll):
     for s, side in ((-1, "R"), (1, "L")):
         for row in range(3):
             cube(f"Kosode.{side}.{row}", (s * (0.235 + row * 0.006), 0.0, H["shoulder"] - 0.05 - row * 0.04),
-                 (0.012, 0.12, 0.04), M["lacquer_bk"] if row % 2 == 0 else M["lacquer_br"], coll,
+                 (0.012, 0.12, 0.04), M["kozane_bk"] if row % 2 == 0 else M["kozane_br"], coll,
                  rot=(0, s * math.radians(-12), 0), bevel=0.003)
     lofted("Nodowa", [(H["neck"] - 0.04, 0.09, 0.08), (H["neck"] + 0.005, 0.075, 0.068)], M["lacquer_bk"], coll)
 
@@ -380,7 +580,7 @@ def build_armor(coll):
     rings = [(0.52, 0.33, 0.27), (0.75, 0.30, 0.245), (0.95, 0.27, 0.215), (1.10, 0.24, 0.185),
              (1.28, 0.25, 0.175), (1.39, 0.30, 0.165), (1.45, 0.25, 0.135), (1.49, 0.12, 0.10)]
     jb, left, right, hem = open_shell("Jinbaori", rings, -55, 235, M["jinbaori"], coll)
-    subsurf(jb, 1)
+    subsurf(jb, 2)
     curve("Jinbaori_Trim_Front.L", left, 0.010, M["trim"], coll)
     curve("Jinbaori_Trim_Front.R", right, 0.010, M["trim"], coll)
     curve("Jinbaori_Trim_Hem", hem, 0.010, M["trim"], coll)
@@ -466,7 +666,7 @@ def build_kabuto(coll):
         bm.to_mesh(sh.data)
         bm.free()
         sh.modifiers.new("Solidify", "SOLIDIFY").thickness = 0.005
-        finish(sh, f"Kabuto_Shikoro.{row}", M["lacquer_bk"] if row % 2 == 0 else M["lace"], coll)
+        finish(sh, f"Kabuto_Shikoro.{row}", M["kozane_bk"] if row % 2 == 0 else M["kozane_br"], coll)
         if row == 0:
             for s in (-1, 1):
                 cube(f"Fukigaeshi.{'L' if s > 0 else 'R'}", (s * 0.135, -0.07, z + 0.01),
@@ -480,27 +680,15 @@ def build_kabuto(coll):
         verts = [(x, 0.0, z) for x, z in pts]
         o = mesh_from(f"Kuwagata.{'L' if s > 0 else 'R'}", verts, [list(range(len(verts)))],
                       M["brass"], coll, thickness=0.005, smooth=False)
+        bv = o.modifiers.new("Bevel", "BEVEL")
+        bv.width = 0.002
+        bv.segments = 2
         o.location = (0, -0.132, hz + 0.04)
         o.rotation_euler = (math.radians(-15), 0, 0)
     cube("Kuwagata_Dai", (0, -0.128, hz + 0.035), (0.10, 0.012, 0.035), M["lacquer_bk"], coll, bevel=0.006)
     cylinder("Maedate_Mon", (0, -0.14, hz + 0.05), 0.022, 0.008, M["brass"], coll, rot=(math.radians(90), 0, 0))
 
-    # 面頬(黒、鼻と髭付き)+ 垂(よだれかけ)
-    bpy.ops.mesh.primitive_uv_sphere_add(segments=32, ring_count=16, location=(0, -0.008, H["chin"] + 0.05))
-    mp = bpy.context.active_object
-    mp.scale = (0.080, 0.096, 0.078)
-    apply_scale(mp)
-    bm = bmesh.new()
-    bm.from_mesh(mp.data)
-    bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.co.y > -0.025 or v.co.z > 0.045], context="VERTS")
-    bm.to_mesh(mp.data)
-    bm.free()
-    mp.modifiers.new("Solidify", "SOLIDIFY").thickness = 0.006
-    finish(mp, "Menpo", M["lacquer_bk"], coll)
-    sphere("Menpo_Nose", (0, -0.103, H["head_c"] - 0.022), (0.016, 0.02, 0.026), M["lacquer_bk"], coll, segs=16)
-    for s in (-1, 1):
-        cube(f"Menpo_Hige.{s}", (s * 0.028, -0.104, H["head_c"] - 0.058), (0.045, 0.008, 0.012),
-             M["lacquer_br"], coll, rot=(0, s * math.radians(-18), 0), bevel=0.004)
+    build_somen(coll)
     for i in range(3):
         bpy.ops.mesh.primitive_cylinder_add(vertices=32, radius=1, depth=0.028,
                                             location=(0, 0.0, H["chin"] - 0.015 - i * 0.026))
@@ -514,6 +702,74 @@ def build_kabuto(coll):
         bm.free()
         y.modifiers.new("Solidify", "SOLIDIFY").thickness = 0.004
         finish(y, f"Yodarekake.{i}", M["lacquer_bk"] if i % 2 == 0 else M["lace"], coll)
+
+
+def build_somen(coll):
+    """総面(そうめん)— 顔全体を覆う黒漆の面。目穴・眉・鼻・頬・歯・植毛の髭"""
+    hc = H["head_c"]
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=96, ring_count=48, location=(0, -0.004, hc - 0.012))
+    m = bpy.context.active_object
+    m.scale = (0.089, 0.106, 0.128)
+    apply_scale(m)
+    bm = bmesh.new()
+    bm.from_mesh(m.data)
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.co.y > 0.025 or v.co.z > 0.062 or v.co.z < -0.135],
+                     context="VERTS")
+    eye_z = 0.012 + 0.012  # 目の高さ(面の原点からの相対)
+    holes = [f for f in bm.faces
+             if any(((f.calc_center_median().x - s * 0.032) / 0.014) ** 2 +
+                    ((f.calc_center_median().z - eye_z) / 0.0055) ** 2 < 1 and f.calc_center_median().y < -0.06 for s in (-1, 1))]
+    mouth = [f for f in bm.faces
+             if (f.calc_center_median().x / 0.024) ** 2 + ((f.calc_center_median().z + 0.068) / 0.005) ** 2 < 1 and f.calc_center_median().y < -0.06]
+    bmesh.ops.delete(bm, geom=holes + mouth, context="FACES")
+    # 面の起伏:頬骨と眉を盛り上げる
+    for v in bm.verts:
+        x, z = v.co.x, v.co.z
+        bump = 0.010 * math.exp(-(((abs(x) - 0.045) / 0.02) ** 2 + ((z + 0.02) / 0.02) ** 2))   # 頬骨
+        bump += 0.008 * math.exp(-(((abs(x) - 0.03) / 0.025) ** 2 + ((z - 0.036) / 0.008) ** 2))  # 眉
+        bump -= 0.006 * math.exp(-(((abs(x) - 0.032) / 0.02) ** 2 + ((z - eye_z) / 0.012) ** 2))  # 目の窪み
+        v.co.y -= bump
+    bm.to_mesh(m.data)
+    bm.free()
+    m.modifiers.new("Solidify", "SOLIDIFY").thickness = 0.005
+    subsurf(m, 1)
+    for s in (-1, 1):
+        sphere(f"Somen_EyeShadow.{s}", (s * 0.032, -0.088, hc + 0.012), (0.018, 0.006, 0.010), M["hair"], coll, segs=16)
+    finish(m, "Somen", M["lacquer_bk"], coll)
+    base = Vector((0, -0.004, hc - 0.012))
+
+    # 鼻(鷲鼻)
+    nose = lofted("Somen_Nose", [
+        (hc - 0.045, 0.019, 0.014, 0, -0.112), (hc - 0.030, 0.016, 0.018, 0, -0.122),
+        (hc - 0.005, 0.010, 0.012, 0, -0.118), (hc + 0.015, 0.008, 0.008, 0, -0.110)],
+        M["lacquer_bk"], coll, verts=16)
+    subsurf(nose, 2)
+    # 眉(盛り上がった眉骨)
+    for s in (-1, 1):
+        curve(f"Somen_Brow.{s}", [(s * 0.012, -0.112, hc + 0.035), (s * 0.033, -0.112, hc + 0.042),
+                                  (s * 0.058, -0.096, hc + 0.035)], 0.0055, M["lacquer_br"], coll)
+    # 歯(口の奥)
+    for i in range(-3, 4):
+        cube(f"Somen_Tooth.{i}", (i * 0.0062, -0.098, hc - 0.081), (0.0055, 0.004, 0.006),
+             material("Teeth_Gilt", (0.75, 0.68, 0.45), metallic=0.6, roughness=0.3), coll, bevel=0.0012, smooth=True)
+    cube("Somen_MouthDark", (0, -0.094, hc - 0.081), (0.05, 0.004, 0.012), M["hair"], coll)
+    # 植毛の髭(口髭とあご髭)
+    hair = material("Mask_Hair", (0.05, 0.045, 0.04), roughness=0.6)
+    import random
+    rnd = random.Random(7)
+    for s in (-1, 1):
+        for k in range(14):
+            t = k / 13
+            x0 = s * (0.006 + 0.024 * t)
+            p0 = (x0, -0.117 + 0.01 * t, hc - 0.070 + 0.004 * t)
+            p1 = (x0 + s * (0.012 + rnd.uniform(0, 0.006)), p0[1] - 0.004, p0[2] - 0.008)
+            p2 = (x0 + s * (0.024 + rnd.uniform(0, 0.01)), p0[1] + 0.006, p0[2] - 0.020 - rnd.uniform(0, 0.01))
+            curve(f"Somen_Hige.{s}.{k}", [p0, p1, p2], 0.0013, hair, coll)
+    for k in range(18):
+        x0 = rnd.uniform(-0.022, 0.022)
+        p0 = (x0, -0.108, hc - 0.105)
+        curve(f"Somen_AgoHige.{k}", [p0, (x0 * 1.1, -0.112, hc - 0.125), (x0 * 1.2 + rnd.uniform(-0.004, 0.004), -0.106, hc - 0.15)],
+              0.0013, hair, coll)
 
 
 def build_katana(coll):
@@ -545,7 +801,8 @@ def build_katana(coll):
               (math.radians(86), 0, math.radians(-45)))
 
     # 扇(右手で横へ掲げる)
-    pivot = Vector(R_WR) + (Vector(R_WR) - Vector(R_EL)).normalized() * 0.07
+    dR = (Vector(R_WR) - Vector(R_EL)).normalized()
+    pivot = Vector(R_WR) + dR * 0.085 + Vector((0, 0, -0.032))
     verts = [tuple(pivot)]
     n = 14
     for i in range(n + 1):
@@ -559,41 +816,61 @@ def build_katana(coll):
 
 # ---------------------------------------------------------------- scene
 def build_scene(coll):
-    bpy.ops.mesh.primitive_plane_add(size=8, location=(0, 0, 0))
-    finish(bpy.context.active_object, "Ground", M["ground"], coll, smooth=False)
+    # 撮影スタジオ風の曲面ホリゾント
+    prof = [(y, 0.0) for y in (-4.0, -1.0, 0.5, 1.2)]
+    for i in range(1, 9):
+        a = math.radians(90 * i / 8)
+        prof.append((1.2 + math.sin(a) * 0.9, 0.9 - math.cos(a) * 0.9))
+    prof.append((2.1, 4.5))
+    verts, faces = [], []
+    for x in (-5.0, 5.0):
+        for y, z in prof:
+            verts.append((x, y, z))
+    n = len(prof)
+    for i in range(n - 1):
+        faces.append((i, i + 1, n + i + 1, n + i))
+    g = mesh_from("Backdrop", verts, faces, M["backdrop"], coll)
+    bpy.ops.mesh.primitive_plane_add(size=2.6, location=(0, -0.2, 0.002))
+    finish(bpy.context.active_object, "Floor_Mat", M["ground"], coll, smooth=False)
 
-    # 身長スケール参照(175cm マーカー)
-    cube("HeightRef_175cm", (0.7, 0.3, HEIGHT / 2), (0.01, 0.01, HEIGHT),
-         material("Ref", (0.9, 0.1, 0.1), roughness=0.5), coll)
+    # 身長スケール参照(175cm マーカー)— ビューポート専用
+    ref = cube("HeightRef_175cm", (0.7, 0.3, HEIGHT / 2), (0.01, 0.01, HEIGHT),
+               material("Ref", (0.9, 0.1, 0.1), roughness=0.5), coll)
+    ref.hide_render = True
 
     scene = bpy.context.scene
     cam_data = bpy.data.cameras.new("Camera")
-    cam_data.lens = 50
+    cam_data.lens = 70
     cam = bpy.data.objects.new("Camera", cam_data)
     coll.objects.link(cam)
-    cam.location = (0.9, -3.9, 1.2)
-    target = Vector((0, 0, 0.95))
+    cam.location = (0.75, -4.6, 1.15)
+    target = Vector((-0.08, 0, 1.0))
     cam.rotation_euler = (target - cam.location).to_track_quat("-Z", "Y").to_euler()
+    cam_data.dof.use_dof = True
+    cam_data.dof.focus_distance = (target - cam.location).length - 0.15
+    cam_data.dof.aperture_fstop = 5.6
     scene.camera = cam
 
-    def light(name, kind, loc, energy, size=1.0):
+    def light(name, kind, loc, energy, size=1.0, color=(1, 1, 1), aim=(0, 0, 1.1)):
         ld = bpy.data.lights.new(name, kind)
         ld.energy = energy
+        ld.color = color
         if kind == "AREA":
             ld.size = size
         lo = bpy.data.objects.new(name, ld)
         coll.objects.link(lo)
         lo.location = loc
-        lo.rotation_euler = (Vector((0, 0, 1.0)) - Vector(loc)).to_track_quat("-Z", "Y").to_euler()
-    light("Key", "AREA", (2.5, -3.0, 3.5), 250, 2.0)
-    light("Fill", "AREA", (-3.0, -2.0, 2.0), 80, 3.0)
-    light("Rim", "AREA", (0.0, 3.0, 3.0), 200, 1.5)
+        lo.rotation_euler = (Vector(aim) - Vector(loc)).to_track_quat("-Z", "Y").to_euler()
+    light("Key", "AREA", (-2.4, -2.8, 3.2), 420, 2.5, (1.0, 0.93, 0.82))
+    light("Fill", "AREA", (3.0, -2.5, 1.6), 110, 3.5, (0.85, 0.9, 1.0))
+    light("Rim", "AREA", (0.8, 2.0, 3.0), 260, 1.2, (1.0, 0.95, 0.9))
+    light("Kicker", "AREA", (-1.8, 1.5, 1.5), 90, 1.0)
 
     world = scene.world or bpy.data.worlds.new("World")
     scene.world = world
     world.use_nodes = True
-    world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.05, 0.05, 0.06, 1)
-    world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.6
+    world.node_tree.nodes["Background"].inputs["Color"].default_value = (0.09, 0.085, 0.08, 1)
+    world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.5
 
 
 def main():
@@ -626,7 +903,13 @@ def main():
         # ヘッドレス環境でも動くよう Cycles(CPU) でプレビュー
         scene.render.engine = "CYCLES"
         scene.cycles.device = "CPU"
-        scene.cycles.samples = 64
+        scene.cycles.samples = 160
+        scene.cycles.max_bounces = 8
+        try:
+            scene.view_settings.view_transform = "AgX"
+            scene.view_settings.look = "AgX - Medium High Contrast"
+        except TypeError:
+            pass
         scene.cycles.use_denoising = True
         scene.render.resolution_x = 1080
         scene.render.resolution_y = 1350
