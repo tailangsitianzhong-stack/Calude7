@@ -543,9 +543,9 @@ function call(text, sub = '', dur = 1.4) {
 
 // ------------------------------------------------------------------ fighters
 const ATK = {
-  diag:  { clip: 'Slash_Diagonal',   speed: 1.25, a0: 11, a1: 16, end: 31, dmg: 20, arc: 80,  lunge: [9, 13, 0.35], name: '袈裟斬り', stop: 0.085, pitch: 1.0 },
-  horiz: { clip: 'Slash_Horizontal', speed: 1.2,  a0: 11, a1: 16, end: 31, dmg: 17, arc: 110, lunge: [9, 13, 0.3], name: '横薙ぎ', horiz: true, stop: 0.08, pitch: 0.85 },
-  over:  { clip: 'Slash_Overhead',   speed: 1.0,  a0: 11, a1: 15, end: 31, dmg: 30, arc: 50,  lunge: [9, 13, 0.45], name: '唐竹割り', stop: 0.15, pitch: 0.7 },
+  diag:  { clip: 'Slash_Diagonal',   speed: 1.25, a0: 10.5, a1: 14.5, end: 31, dmg: 20, arc: 80,  lunge: [9, 13, 0.35], name: '袈裟斬り', stop: 0.085, pitch: 1.0 },
+  horiz: { clip: 'Slash_Horizontal', speed: 1.2,  a0: 10.5, a1: 14.5, end: 31, dmg: 17, arc: 110, lunge: [9, 13, 0.3], name: '横薙ぎ', horiz: true, stop: 0.08, pitch: 0.85 },
+  over:  { clip: 'Slash_Overhead',   speed: 1.0,  a0: 10.5, a1: 14, end: 31, dmg: 30, arc: 50,  lunge: [9, 13, 0.45], name: '唐竹割り', stop: 0.15, pitch: 0.7 },
 };
 const DODGE_KEYS = [[0, 0], [2, 0], [4, 0.18], [6, 0.52], [8, 0.84], [10, 0.98], [12, 1.0]];
 function dodgeCurve(f) {
