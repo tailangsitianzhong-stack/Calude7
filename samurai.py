@@ -7,7 +7,11 @@
   (pip の bpy モジュールでも python3 samurai.py で動作)
 
 単位はメートル。身長(足裏〜頭頂)= 1.75m。兜の前立てはその上に乗ります。
-生成後、samurai.blend と samurai_preview.png を同じフォルダに保存します。
+ポーズは 2 種類:
+  fan    … 右手に扇を掲げ、刀は腰に差したまま  → samurai.blend / samurai_preview.png
+  katana … 抜刀して両手で中段に構える          → samurai_katana.blend / samurai_katana_preview.png
+GUI では下の POSE を書き換えて実行。コマンドラインでは
+  blender --background --python samurai.py -- katana   (省略時は両方を生成)
 """
 import bpy
 import bmesh
@@ -331,8 +335,28 @@ def mesh_from(name, verts, faces, mat, coll, thickness=0.0, smooth=True):
 
 
 # ---------------------------------------------------------------- body
-R_SH, R_EL, R_WR = (-0.20, 0.0, 1.42), (-0.37, -0.10, 1.25), (-0.52, -0.24, 1.23)  # 扇を掲げる右腕
-L_SH, L_EL, L_WR = (0.20, 0.0, 1.42), (0.27, 0.0, 1.14), (0.27, -0.07, 0.93)      # 下ろした左腕
+POSE = "fan"  # GUI 実行時のポーズ: "fan" または "katana"
+
+# 中段の構え:柄頭を臍の前、切先を相手の喉へ向ける
+SWORD_DIR = Vector((0.0, -0.86, 0.51)).normalized()
+GRIP = Vector((0.0, -0.27, 1.00))          # 左手(柄頭側)の握り位置
+ARMS = {
+    # 扇を掲げる右腕 / 下ろした左腕
+    "fan": dict(R=((-0.20, 0.0, 1.42), (-0.37, -0.10, 1.25), (-0.52, -0.24, 1.23)),
+                L=((0.20, 0.0, 1.42), (0.27, 0.0, 1.14), (0.27, -0.07, 0.93))),
+    # 両手で柄を握る(右手が鍔側、左手が柄頭側)
+    "katana": dict(R=((-0.20, 0.0, 1.42), (-0.21, -0.17, 1.17), tuple(GRIP + SWORD_DIR * 0.15 + Vector((-0.045, 0.045, -0.01)))),
+                   L=((0.20, 0.0, 1.42), (0.20, -0.09, 1.11), tuple(GRIP + SWORD_DIR * 0.03 + Vector((0.045, 0.05, -0.02))))),
+}
+
+
+def set_pose(pose):
+    global POSE, R_SH, R_EL, R_WR, L_SH, L_EL, L_WR
+    POSE = pose
+    (R_SH, R_EL, R_WR), (L_SH, L_EL, L_WR) = ARMS[pose]["R"], ARMS[pose]["L"]
+
+
+set_pose(POSE)
 
 
 def build_body(coll):
@@ -367,8 +391,13 @@ def build_body(coll):
             limb(f"Ikada_Upper.{side}.{t}", p - (b - a) * 0.06, p + (b - a) * 0.06, 0.066, 0.064, M["lacquer_br"], coll, verts=12)
         limb(f"Ikada_Fore.{side}", b.lerp(c, 0.2), b.lerp(c, 0.85), 0.054, 0.045, M["lacquer_bk"], coll, verts=8)
         d = (c - b).normalized()
-        hand(side, c - d * 0.01, d, coll, curl=85 if side == "R" else 22,
-             roll=0 if side == "R" else -90, thumb=-1 if side == "R" else 1)
+        if POSE == "katana":
+            # 柄を握る:手のひらを柄へ向け、親指は切先側に回す
+            g = GRIP + SWORD_DIR * (0.15 if side == "R" else 0.03)
+            hand(side, c - d * 0.01, d, coll, curl=88, palm_to=g, thumb_dir=SWORD_DIR)
+        else:
+            hand(side, c - d * 0.01, d, coll, curl=85 if side == "R" else 22,
+                 roll=0 if side == "R" else -90, thumb=-1 if side == "R" else 1)
 
     # 脚:裁着袴(たっつけばかま)+脛当+足袋・草鞋、やや開いた立ち姿
     for s, side in ((-1, "R"), (1, "L")):
@@ -445,7 +474,7 @@ def organic(name, names, mat, coll, voxel=0.006, smooth=10):
     return o
 
 
-def hand(side, wrist, d, coll, curl=30, roll=0.0, thumb=1):
+def hand(side, wrist, d, coll, curl=30, roll=0.0, thumb=1, palm_to=None, thumb_dir=None):
     """指付きの手。ローカル座標 X=指の並び, Y=指先方向, Z=手の甲"""
     from mathutils import Matrix
     up = Vector((0, 0, 1)) if abs(d.z) < 0.9 else Vector((1, 0, 0))
@@ -454,6 +483,13 @@ def hand(side, wrist, d, coll, curl=30, roll=0.0, thumb=1):
     q = Matrix.Rotation(math.radians(roll), 3, d)
     nz = (q @ nz).normalized()
     sx = d.cross(nz).normalized()
+    if palm_to is not None:
+        v = Vector(palm_to) - Vector(wrist)
+        v = v - d * v.dot(d)
+        nz = -v.normalized()
+        sx = d.cross(nz).normalized()
+    if thumb_dir is not None:
+        thumb = 1 if sx.dot(thumb_dir) >= 0 else -1
     basis = Matrix((sx, d, nz)).transposed()
 
     def W(v):
@@ -774,7 +810,7 @@ def build_somen(coll):
 
 def build_katana(coll):
     """左腰に水平気味に差した打刀・脇差と、右手に掲げた扇"""
-    def blade_set(prefix, length, tsuka_len, loc, rot):
+    def blade_set(prefix, length, tsuka_len, loc, rot, drawn=False):
         root = bpy.data.objects.new(prefix, None)
         coll.objects.link(root)
         root.location = loc
@@ -782,12 +818,16 @@ def build_katana(coll):
         parts = [
             cylinder(f"{prefix}_Saya", (0, 0, -length / 2), 0.016, length, M["saya"], coll, verts=16, scale=(1.0, 1.6, 1)),
             cylinder(f"{prefix}_Kojiri", (0, 0, -length - 0.01), 0.017, 0.02, M["brass"], coll, verts=16, scale=(1.0, 1.6, 1)),
-            cylinder(f"{prefix}_Tsuba", (0, 0, 0.005), 0.040, 0.008, M["lacquer_bk"], coll, verts=24),
-            cylinder(f"{prefix}_Tsuka", (0, 0, 0.01 + tsuka_len / 2), 0.015, tsuka_len, M["tsuka"], coll, verts=16, scale=(1.0, 1.4, 1)),
-            cylinder(f"{prefix}_Kashira", (0, 0, 0.012 + tsuka_len), 0.016, 0.012, M["brass"], coll, verts=16, scale=(1.0, 1.4, 1)),
+            cylinder(f"{prefix}_Koiguchi", (0, 0, -0.008), 0.0175, 0.016, M["brass"], coll, verts=16, scale=(1.0, 1.6, 1)),
         ]
+        if not drawn:
+            parts += [
+                cylinder(f"{prefix}_Tsuba", (0, 0, 0.005), 0.040, 0.008, M["lacquer_bk"], coll, verts=24),
+                cylinder(f"{prefix}_Tsuka", (0, 0, 0.01 + tsuka_len / 2), 0.015, tsuka_len, M["tsuka"], coll, verts=16, scale=(1.0, 1.4, 1)),
+                cylinder(f"{prefix}_Kashira", (0, 0, 0.012 + tsuka_len), 0.016, 0.012, M["brass"], coll, verts=16, scale=(1.0, 1.4, 1)),
+            ]
         # 柄巻きの菱
-        for i in range(6):
+        for i in range(0 if drawn else 6):
             parts.append(cube(f"{prefix}_Hishi.{i}", (0, -0.022, 0.03 + i * tsuka_len / 6.5), (0.012, 0.004, 0.012),
                               M["cord"], coll, rot=(0, math.radians(45), 0)))
         for p in parts:
@@ -796,9 +836,13 @@ def build_katana(coll):
 
     # 柄は体の前で内向き、鞘は後方へ水平に伸びる
     blade_set("Katana", 0.73, 0.25, (0.21, -0.16, H["waist"] - 0.07),
-              (math.radians(84), 0, math.radians(-35)))
+              (math.radians(84), 0, math.radians(-35)), drawn=(POSE == "katana"))
     blade_set("Wakizashi", 0.48, 0.17, (0.15, -0.18, H["waist"] - 0.02),
               (math.radians(86), 0, math.radians(-45)))
+
+    if POSE == "katana":
+        build_drawn_katana(coll)
+        return
 
     # 扇(右手で横へ掲げる)
     dR = (Vector(R_WR) - Vector(R_EL)).normalized()
@@ -812,6 +856,80 @@ def build_katana(coll):
     mesh_from("Fan", verts, faces, M["paper"], coll, thickness=0.003, smooth=False)
     for i in range(0, n + 1, 2):
         curve(f"Fan_Rib.{i}", [tuple(pivot), verts[i + 1]], 0.0025, M["lacquer_br"], coll, smooth=False)
+
+
+def build_drawn_katana(coll, blade_len=0.70, tsuka_len=0.25, sori=0.017):
+    """抜き身の打刀:反りのある鎬造りの刀身(切先付き)+ はばき・鍔・柄"""
+    from mathutils import Matrix
+    u = SWORD_DIR
+    e = Vector((0, 0, -1))
+    e = (e - u * e.dot(u)).normalized()           # 刃の向き(下側)
+    t = u.cross(e).normalized()                   # 刀身の厚み方向
+    base = GRIP - u * 0.03                         # 柄頭
+    tsuba = base + u * tsuka_len
+    steel = material("Blade_Steel", (0.86, 0.87, 0.9), metallic=1.0, roughness=0.12,
+                     bump="noise", scale=2000, strength=0.01)
+    hamon = material("Blade_Hamon", (0.95, 0.95, 0.95), metallic=0.85, roughness=0.32,
+                     bump="noise", scale=900, strength=0.02)
+
+    # 刀身:断面 = 棟・鎬(左右)・刃 の 4 点を長さ方向に掃引
+    N = 90
+    verts, faces = [], []
+    for i in range(N + 1):
+        sp = i / N
+        w = 0.031 - 0.009 * sp
+        th = 0.0075 - 0.0025 * sp
+        if sp > 0.93:                               # 切先(ふくら)
+            k = (1 - sp) / 0.07
+            w *= math.sqrt(max(k, 0.0))
+            th *= max(k, 0.05)
+        c = tsuba + u * (0.03 + blade_len * sp) - e * (sori * math.sin(math.pi * sp * 0.85) + sori * 0.4 * sp)
+        verts += [tuple(c), tuple(c + e * w * 0.32 - t * th / 2), tuple(c + e * w * 0.97),
+                  tuple(c + e * w * 0.32 + t * th / 2), tuple(c + e * w * 0.70 - t * th * 0.28),
+                  tuple(c + e * w * 0.70 + t * th * 0.28)]
+    S = 6
+    for i in range(N):
+        a, b = i * S, (i + 1) * S
+        # 棟〜鎬(地鉄) / 鎬〜刃文線(地鉄) / 刃文線〜刃(刃文)
+        faces += [(a + 0, b + 0, b + 1, a + 1), (a + 3, b + 3, b + 0, a + 0),
+                  (a + 1, b + 1, b + 4, a + 4), (a + 5, b + 5, b + 3, a + 3),
+                  (a + 4, b + 4, b + 2, a + 2), (a + 2, b + 2, b + 5, a + 5)]
+    faces.append((0, 1, 4, 2, 5, 3))
+    me = bpy.data.meshes.new("Katana_Blade")
+    me.from_pydata(verts, [], faces)
+    me.materials.append(steel)
+    me.materials.append(hamon)
+    for k, poly in enumerate(me.polygons):
+        poly.material_index = 1 if (k < N * 6 and k % 6 in (4, 5)) else 0
+        poly.use_smooth = False
+    me.update()
+    blade = bpy.data.objects.new("Katana_Blade", me)
+    coll.objects.link(blade)
+    bv = blade.modifiers.new("WeightedNormal", "WEIGHTED_NORMAL")
+
+    # 刀装具:ローカル Z = 刀の軸
+    rot = Matrix((t, e, u)).transposed().to_4x4()
+
+    def part(obj, pos):
+        obj.matrix_world = Matrix.Translation(pos) @ rot
+        return obj
+    part(cylinder("Katana_Habaki", (0, 0, 0), 0.016, 0.03, M["brass"], coll, verts=16, scale=(0.55, 1.15, 1)),
+         tsuba + u * 0.017 + e * 0.004)
+    part(cylinder("Katana_Seppa", (0, 0, 0), 0.022, 0.004, M["brass"], coll, verts=24, scale=(0.8, 1.2, 1)),
+         tsuba + u * 0.001)
+    part(cylinder("Katana_Tsuba", (0, 0, 0), 0.040, 0.007, M["lacquer_bk"], coll, verts=32, scale=(0.95, 1.05, 1)),
+         tsuba - u * 0.004)
+    part(cylinder("Katana_Fuchi", (0, 0, 0), 0.0165, 0.014, M["brass"], coll, verts=16, scale=(1.0, 1.4, 1)),
+         tsuba - u * 0.015)
+    part(cylinder("Katana_Tsuka", (0, 0, 0), 0.015, tsuka_len - 0.03, M["tsuka"], coll, verts=16, scale=(1.0, 1.4, 1)),
+         base + u * (tsuka_len / 2))
+    part(cylinder("Katana_Kashira", (0, 0, 0), 0.0165, 0.012, M["brass"], coll, verts=16, scale=(1.0, 1.4, 1)),
+         base + u * 0.006)
+    for i in range(7):
+        for sgn in (-1, 1):
+            h = part(cube(f"Katana_Hishi.{i}.{sgn}", (0, 0, 0), (0.011, 0.004, 0.011), M["cord"], coll),
+                     base + u * (0.03 + i * 0.03) + t * sgn * 0.0148)
+            h.matrix_world = h.matrix_world @ Matrix.Rotation(math.radians(90), 4, "Y") @ Matrix.Rotation(math.radians(45), 4, "X")
 
 
 # ---------------------------------------------------------------- scene
@@ -843,8 +961,12 @@ def build_scene(coll):
     cam_data.lens = 70
     cam = bpy.data.objects.new("Camera", cam_data)
     coll.objects.link(cam)
-    cam.location = (0.75, -4.6, 1.15)
-    target = Vector((-0.08, 0, 1.0))
+    if POSE == "katana":   # 刀身が見えるよう斜め前から
+        cam.location = (2.7, -3.8, 1.3)
+        target = Vector((0.0, -0.25, 1.0))
+    else:
+        cam.location = (0.75, -4.6, 1.15)
+        target = Vector((-0.08, 0, 1.0))
     cam.rotation_euler = (target - cam.location).to_track_quat("-Z", "Y").to_euler()
     cam_data.dof.use_dof = True
     cam_data.dof.focus_distance = (target - cam.location).length - 0.15
@@ -873,7 +995,10 @@ def build_scene(coll):
     world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.5
 
 
-def main():
+def main(pose=None):
+    if pose:
+        set_pose(pose)
+    suffix = "" if POSE == "fan" else "_" + POSE
     clear_scene()
     build_materials()
     c_body = collection("Samurai_Body")
@@ -894,7 +1019,7 @@ def main():
               for v in o.evaluated_get(dg).bound_box)
     print(f"[samurai] body height = {top * 100:.1f} cm")
 
-    blend = os.path.join(OUT_DIR, "samurai.blend")
+    blend = os.path.join(OUT_DIR, f"samurai{suffix}.blend")
     bpy.ops.wm.save_as_mainfile(filepath=blend)
     print(f"[samurai] saved {blend}")
 
@@ -903,7 +1028,7 @@ def main():
         # ヘッドレス環境でも動くよう Cycles(CPU) でプレビュー
         scene.render.engine = "CYCLES"
         scene.cycles.device = "CPU"
-        scene.cycles.samples = 160
+        scene.cycles.samples = int(os.environ.get("SAMURAI_SAMPLES", 160))
         scene.cycles.max_bounces = 8
         try:
             scene.view_settings.view_transform = "AgX"
@@ -913,7 +1038,7 @@ def main():
         scene.cycles.use_denoising = True
         scene.render.resolution_x = 1080
         scene.render.resolution_y = 1350
-        scene.render.filepath = os.path.join(OUT_DIR, "samurai_preview.png")
+        scene.render.filepath = os.path.join(OUT_DIR, f"samurai{suffix}_preview.png")
         try:
             bpy.ops.render.render(write_still=True)
             print(f"[samurai] rendered {scene.render.filepath}")
@@ -922,4 +1047,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+    if not bpy.app.background:
+        main(POSE)                       # GUI: POSE で指定したポーズ
+    else:
+        for p in (args or ["fan", "katana"]):
+            main(p)
