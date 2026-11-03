@@ -543,10 +543,18 @@ function call(text, sub = '', dur = 1.4) {
 
 // ------------------------------------------------------------------ fighters
 const ATK = {
-  diag:  { clip: 'Slash_Diagonal',   speed: 1.3,  a0: 11, a1: 16, end: 27, dmg: 20, arc: 80,  lunge: [9, 14, 0.55], name: '袈裟斬り', stop: 0.085, pitch: 1.0 },
-  horiz: { clip: 'Slash_Horizontal', speed: 1.25, a0: 11, a1: 16, end: 27, dmg: 17, arc: 110, lunge: [9, 14, 0.45], name: '横薙ぎ', horiz: true, stop: 0.08, pitch: 0.85 },
-  over:  { clip: 'Slash_Overhead',   speed: 1.05, a0: 11, a1: 15, end: 27, dmg: 30, arc: 50,  lunge: [9, 14, 0.7], name: '唐竹割り', stop: 0.15, pitch: 0.7 },
+  diag:  { clip: 'Slash_Diagonal',   speed: 1.25, a0: 11, a1: 16, end: 31, dmg: 20, arc: 80,  lunge: [9, 13, 0.35], name: '袈裟斬り', stop: 0.085, pitch: 1.0 },
+  horiz: { clip: 'Slash_Horizontal', speed: 1.2,  a0: 11, a1: 16, end: 31, dmg: 17, arc: 110, lunge: [9, 13, 0.3], name: '横薙ぎ', horiz: true, stop: 0.08, pitch: 0.85 },
+  over:  { clip: 'Slash_Overhead',   speed: 1.0,  a0: 11, a1: 15, end: 31, dmg: 30, arc: 50,  lunge: [9, 13, 0.45], name: '唐竹割り', stop: 0.15, pitch: 0.7 },
 };
+const DODGE_KEYS = [[0, 0], [2, 0], [4, 0.18], [6, 0.52], [8, 0.84], [10, 0.98], [12, 1.0]];
+function dodgeCurve(f) {
+  for (let i = 1; i < DODGE_KEYS.length; i++) {
+    const [f1, d1] = DODGE_KEYS[i], [f0, d0] = DODGE_KEYS[i - 1];
+    if (f <= f1) return d0 + (d1 - d0) * clamp((f - f0) / (f1 - f0), 0, 1);
+  }
+  return 1.0;
+}
 const WADE = -0.5;  // 膝まで浸かれる深さまで歩ける
 function walkable(x, z) {
   if (islandH(x, z) < WADE) return false;
@@ -639,7 +647,7 @@ class Fighter {
   }
   dodge() {
     if (this.state === 'dead' || this.busy) return;
-    this.state = 'dodge'; this.play('Dodge', { once: true, speed: 1.55, fade: 0.06 });
+    this.state = 'dodge'; this.play('Dodge', { once: true, speed: 1.3, fade: 0.05 }); this.dodgeD = 0;
     burst(this.pos.clone().add(new THREE.Vector3(0, 0.1, 0)), 10, '#cdbb92', 2.2, 0.05, 0.6, -3);
   }
   crouch(on) {
@@ -650,7 +658,7 @@ class Fighter {
       this.crouchHeld = false;
     }
   }
-  get invulnerable() { return this.state === 'dodge' && this.frame() > 2 && this.frame() < 24; }
+  get invulnerable() { return this.state === 'dodge' && this.frame() > 1.5 && this.frame() < 14; }
   get ducking() { return this.state === 'crouch' && this.frame() > 4 && this.frame() < 34; }
   inActive() { return this.state === 'attack' && this.frame() >= ATK[this.atk.type].a0 && this.frame() <= ATK[this.atk.type].a1; }
   inWindup() { return this.state === 'attack' && this.frame() < ATK[this.atk.type].a0; }
@@ -684,8 +692,13 @@ class Fighter {
       } else if (f >= A.end) {
         this.state = 'idle'; this.play('Idle', { fade: 0.3 });
       }
-    } else if (this.state === 'dodge' && f >= 36) { this.state = 'idle'; this.play('Idle', { fade: 0.2 }); }
-    else if (this.state === 'hit' && f >= 18) { this.state = 'idle'; this.play('Idle', { fade: 0.2 }); }
+    } else if (this.state === 'dodge') {
+      const want = dodgeCurve(f);   // 右へ 1m、アニメの足運びと同じ曲線で
+      const right = new THREE.Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
+      this.tryMove(right.multiplyScalar(want - this.dodgeD)); this.dodgeD = want;
+      if (f >= 24) { this.state = 'idle'; this.play('Idle', { fade: 0.25 }); }
+    }
+    else if (this.state === 'hit' && f >= 20) { this.state = 'idle'; this.play('Idle', { fade: 0.2 }); }
     else if (this.state === 'crouch') {
       if (this.crouchHeld && f >= 10 && f < 30) this.cur.paused = true;
       if (!this.crouchHeld && this.cur.paused) { this.cur.paused = false; this.cur.time = 30 / FPS; }
@@ -700,14 +713,14 @@ class Fighter {
       if (len > 0.05) {
         const dir = move.dir.clone().setY(0).normalize();
         const depth = -islandH(this.pos.x, this.pos.z);
-        let sp = (move.run ? 4.0 : 1.7) * len;
+        let sp = (move.run ? 5.4 : 1.5) * len;
         if (depth > 0) sp *= 1 - Math.min(depth, 0.5) * 1.1;   // 潮に足を取られる
         this.tryMove(dir.clone().multiplyScalar(sp * dt));
         this.state = 'move';
         moveYaw = Math.atan2(dir.x, dir.z);
         const back = move.lock && dir.dot(this.forward()) < -0.3;
-        if (move.run && !back) this.play('Run', { speed: 1.2 }); else this.play('Walk', { speed: back ? -1.3 : 1.3 });
-        this.stepT = (this.stepT || 0) + dt * (move.run ? 2.6 : 1.4);
+        if (move.run && !back) this.play('Run', { speed: 1.9 }); else this.play('Walk', { speed: back ? -1.7 : 1.7 });
+        this.stepT = (this.stepT || 0) + dt * (move.run ? 4.7 : 1.6);
         if (this.stepT > 1) {
           this.stepT = 0; sfx('step');
           if (depth > 0.03) burst(this.pos.clone().setY(0.02), 8, '#e8f2f2', 1.8, 0.03, 0.5, -7);

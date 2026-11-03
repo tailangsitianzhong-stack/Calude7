@@ -1177,19 +1177,16 @@ def build_rig(colls):
     return arm
 
 
-def _fcurves(action):
-    for layer in getattr(action, "layers", []):
-        for strip in layer.strips:
-            for cb in strip.channelbags:
-                yield from cb.fcurves
-
-
 CHUDAN = dict(P=GRIP - SWORD_DIR * 0.03, u=SWORD_DIR, hint=(0, 0, -1))
+LIMB_KEYS = ("hips", "spine", "chest", "neck", "head", "sword", "ik_foot.L", "ik_foot.R",
+             "upper_arm.L", "forearm.L", "hand.L", "pole_knee.L", "pole_knee.R")
 
 
 def pose_rig(arm, hips=(0, 0, 0), hips_rot=(0, 0, 0), spine=(0, 0, 0), chest=(0, 0, 0), neck=(0, 0, 0),
-             sword=None, foot_L=(0, 0, 0), foot_R=(0, 0, 0), sword_follow=True):
-    """アーマチュア空間の角度(度)/オフセット(m)でポーズを設定。各回転は親に対する相対"""
+             head=(0, 0, 0), sword=None, foot_L=(0, 0, 0), foot_R=(0, 0, 0), footL_rot=(0, 0, 0),
+             footR_rot=(0, 0, 0), armL=None, ikL=1.0, sword_follow=True):
+    """アーマチュア空間の角度(度)/オフセット(m)でポーズを設定。各回転は親に対する相対。
+    ikL=0 で左手を柄から離し、armL=(上腕, 前腕) の回転で振らせる(片手持ち)"""
     pb = arm.pose.bones
     for b in pb:
         b.rotation_mode = "QUATERNION"
@@ -1208,18 +1205,32 @@ def pose_rig(arm, hips=(0, 0, 0), hips_rot=(0, 0, 0), spine=(0, 0, 0), chest=(0,
     rel("spine", spine)
     rel("chest", chest)
     rel("neck", neck)
-    for side, off in (("L", foot_L), ("R", foot_R)):
+    rel("head", head)
+    for side, off, rot in (("L", foot_L, footL_rot), ("R", foot_R, footR_rot)):
         fb = arm.data.bones[f"ik_foot.{side}"]
-        pb[f"ik_foot.{side}"].matrix = Matrix.Translation(Vector(off)) @ fb.matrix_local
+        a = fb.head_local
+        Rf = Euler([math.radians(v) for v in rot]).to_matrix().to_4x4()
+        pb[f"ik_foot.{side}"].matrix = Matrix.Translation(Vector(off) + a) @ Rf @ Matrix.Translation(-a) @ fb.matrix_local
+    if armL:
+        rel("upper_arm.L", armL[0])
+        rel("forearm.L", armL[1])
+    pb["forearm.L"].constraints["IK"].influence = ikL
+    pb["hand.L"].constraints["Copy Rotation"].influence = ikL
     s = dict(CHUDAN, **(sword or {}))
     x, y, z = _sword_frame(s["u"], s["hint"])
-    P = Vector(s["P"]) + (Vector(hips) if sword_follow else Vector())
-    M = Matrix((x, y, z)).transposed().to_4x4()
+    Rm = Matrix((x, y, z)).transposed()
+    if s.get("H") is not None:      # 右手の位置で刀を置く(片手持ち)
+        P = Vector(s["H"]) - Rm @ SWORD_RH
+    else:
+        P = Vector(s["P"])
+    P = P + (Vector(hips) if sword_follow else Vector())
+    M = Rm.to_4x4()
     M.translation = P
     pb["sword"].matrix = M
 
 
 _PREVQ = {}
+SWORD_RH = Vector()
 
 
 def key_rig(arm, frame, **pose):
@@ -1231,13 +1242,22 @@ def key_rig(arm, frame, **pose):
         if prev is not None and prev.dot(q) < 0:
             b.rotation_quaternion = -q
         _PREVQ[b.name] = b.rotation_quaternion.copy()
-    for name in ("hips", "spine", "chest", "neck", "sword", "ik_foot.L", "ik_foot.R", "pole_knee.L", "pole_knee.R"):
+    for name in LIMB_KEYS:
         b = arm.pose.bones[name]
         b.keyframe_insert("location", frame=frame)
         b.keyframe_insert("rotation_quaternion", frame=frame)
+    arm.pose.bones["forearm.L"].constraints["IK"].keyframe_insert("influence", frame=frame)
+    arm.pose.bones["hand.L"].constraints["Copy Rotation"].keyframe_insert("influence", frame=frame)
 
 
-def new_action(arm, name, keys, cyclic=False, smooth=False):
+def _fcurves(action):
+    for layer in getattr(action, "layers", []):
+        for strip in layer.strips:
+            for cb in strip.channelbags:
+                yield from cb.fcurves
+
+
+def new_action(arm, name, keys, cyclic=False, smooth=True):
     _PREVQ.clear()
     act = bpy.data.actions.new(name)
     act.use_fake_user = True
@@ -1245,143 +1265,218 @@ def new_action(arm, name, keys, cyclic=False, smooth=False):
     arm.animation_data.action = act
     for f, pose in keys:
         key_rig(arm, f, **pose)
-    if cyclic:
-        for fc in _fcurves(act):
+    for fc in _fcurves(act):
+        if cyclic:
             fc.modifiers.new("CYCLES")
-    if smooth:
-        for fc in _fcurves(act):
+        if smooth:
             for kp in fc.keyframe_points:
                 kp.interpolation = "BEZIER"
                 kp.handle_left_type = kp.handle_right_type = "AUTO"
-            fc.update()
+        fc.update()
     act.frame_range = (keys[0][0], keys[-1][0])
     return act
 
 
-def S(P, u, hint):
-    return dict(P=Vector(P), u=Vector(u), hint=Vector(hint))
+def S(P=None, u=SWORD_DIR, hint=(0, 0, -1), H=None):
+    return dict(P=Vector(P) if P is not None else None, u=Vector(u), hint=Vector(hint), H=H)
+
+
+# 構え(中段・やや低い重心、右足前・左踵を浮かせる)
+STANCE = dict(hips=(0, 0, -0.07), foot_R=(0.0, -0.13, 0), foot_L=(0.0, 0.07, 0), footL_rot=(14, 0, 0))
+
+
+def st(**kw):
+    """構えを基準にしたポーズ。hips は構えからの相対"""
+    d = dict(STANCE)
+    for k, v in kw.items():
+        d[k] = tuple(a + b for a, b in zip(STANCE["hips"], v)) if k == "hips" else v
+    return d
 
 
 def build_actions(arm):
+    global SWORD_RH
+    bs = arm.data.bones
+    SWORD_RH = bs["sword"].matrix_local.inverted() @ bs["ik_hand.R"].head_local   # 刀から見た右手の位置
     C = CHUDAN
     P0 = Vector(C["P"])
     acts = []
-    # 斬撃は「溜め(0-9) → 一気に振り抜く(9-15) → 行き過ぎ(18) → 残心(24) → 戻り(36)」
-    # --- 袈裟斬り(右上から左下への斜め斬り)
+    # ===== 斬撃:腰 → 胸 → 腕 → 刀の順に力が伝わる(運動連鎖)。深い踏み込みと後ろ足の引き付け
+    # --- 袈裟斬り
     acts.append(new_action(arm, "Slash_Diagonal", [
-        (0, dict()),
-        (6, dict(sword=S((-0.20, -0.08, 1.50), (-0.40, 0.45, 0.80), (0.5, -0.7, -0.3)),
-                 hips=(0, 0.04, -0.02), hips_rot=(0, 0, -14), chest=(0, 0, -26), spine=(-6, -4, -8), neck=(0, 0, 10))),
-        (9, dict(sword=S((-0.24, -0.04, 1.52), (-0.42, 0.62, 0.66), (0.5, -0.7, -0.3)),
-                 hips=(0, 0.05, -0.03), hips_rot=(0, 0, -17), chest=(0, 0, -34), spine=(-7, -5, -10), neck=(0, 0, 14))),
-        (11, dict(sword=S((-0.14, -0.30, 1.44), (-0.05, -0.45, 0.89), (0.6, -0.6, -0.4)),
-                  hips=(0, -0.02, -0.05), hips_rot=(0, 0, -6), chest=(4, 0, -10), spine=(2, 0, -4), foot_R=(0, -0.12, 0.06))),
-        (13, dict(sword=S((-0.02, -0.44, 1.20), (0.45, -0.82, 0.35), (0.6, -0.1, -0.8)),
-                  hips=(0, -0.09, -0.09), hips_rot=(0, 0, 10), chest=(10, 0, 16), spine=(10, 0, 4), foot_R=(0, -0.24, 0))),
-        (15, dict(sword=S((0.16, -0.34, 0.98), (0.75, -0.40, -0.52), (0.2, 0.4, -0.9)),
-                  hips=(0, -0.10, -0.11), hips_rot=(0, 0, 20), chest=(14, 0, 32), spine=(12, 0, 8), foot_R=(0, -0.24, 0))),
-        (18, dict(sword=S((0.22, -0.20, 0.90), (0.60, -0.05, -0.80), (0.1, 0.6, -0.8)),
-                  hips=(0, -0.10, -0.12), hips_rot=(0, 0, 24), chest=(16, 0, 40), spine=(13, 0, 10), foot_R=(0, -0.24, 0))),
-        (24, dict(sword=S((0.16, -0.28, 0.98), (0.70, -0.45, -0.55), (0.2, 0.4, -0.9)),
-                  hips=(0, -0.09, -0.10), hips_rot=(0, 0, 16), chest=(10, 0, 26), spine=(9, 0, 6), foot_R=(0, -0.24, 0))),
-        (36, dict()),
-    ], smooth=True))
-    # --- 振り下ろし(上段からの真っ向斬り)
+        (0, st()),
+        (4, st(sword=S((-0.12, -0.16, 1.32), (-0.25, 0.0, 0.97), (0.5, -0.7, -0.3)), hips=(0, 0.03, 0.0),
+               hips_rot=(0, 0, -8), chest=(0, 0, -16), spine=(-3, -2, -4), neck=(0, 0, 6))),
+        (8, st(sword=S((-0.24, -0.04, 1.52), (-0.42, 0.62, 0.66), (0.5, -0.7, -0.3)), hips=(0, 0.05, -0.01),
+               hips_rot=(0, 0, -18), chest=(0, 0, -36), spine=(-7, -5, -10), neck=(0, 0, 16), head=(0, 0, 4),
+               footL_rot=(20, 0, 0))),
+        (10, st(sword=S((-0.22, -0.10, 1.53), (-0.35, 0.35, 0.87), (0.5, -0.7, -0.3)), hips=(0, -0.04, -0.02),
+                hips_rot=(0, 0, -4), chest=(0, 0, -28), spine=(-3, -3, -8), neck=(0, 0, 12),
+                foot_R=(0, -0.22, 0.05), footR_rot=(-12, 0, 0))),
+        (12, st(sword=S((-0.10, -0.36, 1.38), (0.05, -0.60, 0.80), (0.6, -0.5, -0.6)), hips=(0, -0.10, -0.08),
+                hips_rot=(0, 0, 10), chest=(6, 0, -4), spine=(6, 0, -2), neck=(-2, 0, 2),
+                foot_R=(0, -0.32, 0), footR_rot=(-6, 0, 0), footL_rot=(30, 0, 0))),
+        (13, st(sword=S((-0.02, -0.46, 1.18), (0.45, -0.82, 0.35), (0.6, -0.1, -0.8)), hips=(0, -0.12, -0.11),
+                hips_rot=(0, 0, 15), chest=(10, 0, 14), spine=(10, 0, 3), neck=(-4, 0, -6),
+                foot_R=(0, -0.32, 0), footL_rot=(34, 0, 0))),
+        (15, st(sword=S((0.16, -0.36, 0.96), (0.75, -0.40, -0.52), (0.2, 0.4, -0.9)), hips=(0, -0.14, -0.14),
+                hips_rot=(0, 0, 22), chest=(14, 0, 32), spine=(12, 0, 8), neck=(-6, 0, -14),
+                foot_R=(0, -0.32, 0), foot_L=(0, -0.02, 0.02), footL_rot=(30, 0, 0))),
+        (18, st(sword=S((0.24, -0.20, 0.88), (0.55, -0.05, -0.83), (0.1, 0.6, -0.8)), hips=(0, -0.14, -0.15),
+                hips_rot=(0, 0, 26), chest=(16, 0, 42), spine=(14, 0, 10), neck=(-6, 0, -18),
+                foot_R=(0, -0.32, 0), foot_L=(0, -0.04, 0), footL_rot=(22, 0, 0))),
+        (22, st(sword=S((0.18, -0.26, 0.95), (0.68, -0.40, -0.60), (0.2, 0.4, -0.9)), hips=(0, -0.13, -0.13),
+                hips_rot=(0, 0, 20), chest=(12, 0, 30), spine=(11, 0, 8), neck=(-5, 0, -12),
+                foot_R=(0, -0.32, 0), foot_L=(0, -0.04, 0), footL_rot=(16, 0, 0))),
+        (28, st(sword=S((0.12, -0.30, 1.0), (0.6, -0.55, -0.55), (0.2, 0.4, -0.9)), hips=(0, -0.10, -0.10),
+                hips_rot=(0, 0, 12), chest=(8, 0, 18), spine=(8, 0, 4), neck=(-3, 0, -6),
+                foot_R=(0, -0.30, 0), foot_L=(0, -0.02, 0), footL_rot=(14, 0, 0))),
+        (40, st()),
+    ]))
+    # --- 唐竹割り(上段から真っ向)
     acts.append(new_action(arm, "Slash_Overhead", [
-        (0, dict()),
-        (6, dict(sword=S((0, -0.12, 1.55), (0, 0.25, 0.97), (0, -1, 0)), hips=(0, 0.02, 0.01), spine=(-8, 0, 0),
-                 neck=(-5, 0, 0), foot_R=(0, -0.06, 0.04))),
-        (9, dict(sword=S((0, -0.06, 1.60), (0, 0.58, 0.81), (0, -1, 0)), hips=(0, 0.03, 0.02), spine=(-11, 0, 0),
-                 chest=(-4, 0, 0), neck=(-6, 0, 0), foot_R=(0, -0.10, 0.06))),
-        (11, dict(sword=S((0, -0.30, 1.52), (0, -0.50, 0.87), (0, -0.8, -0.6)), hips=(0, -0.05, -0.04), spine=(4, 0, 0),
-                  foot_R=(0, -0.20, 0.03))),
-        (13, dict(sword=S((0, -0.44, 1.08), (0, -0.97, -0.25), (0, 0, -1)), hips=(0, -0.11, -0.13), spine=(18, 0, 0),
-                  chest=(5, 0, 0), foot_R=(0, -0.26, 0))),
-        (15, dict(sword=S((0, -0.39, 0.92), (0, -0.70, -0.71), (0, 0.3, -1)), hips=(0, -0.12, -0.15), spine=(24, 0, 0),
-                  chest=(6, 0, 0), foot_R=(0, -0.26, 0))),
-        (18, dict(sword=S((0, -0.35, 0.85), (0, -0.52, -0.85), (0, 0.4, -1)), hips=(0, -0.12, -0.16), spine=(27, 0, 0),
-                  chest=(6, 0, 0), foot_R=(0, -0.26, 0))),
-        (24, dict(sword=S((0, -0.36, 0.95), (0, -0.75, -0.66), (0, 0.3, -1)), hips=(0, -0.11, -0.13), spine=(20, 0, 0),
-                  chest=(4, 0, 0), foot_R=(0, -0.26, 0))),
-        (36, dict()),
-    ], smooth=True))
-    # --- 横薙ぎ(右から左への水平斬り)
+        (0, st()),
+        (4, st(sword=S((0, -0.18, 1.40), (0, -0.05, 1.0), (0, -1, 0)), hips=(0, 0.02, 0.02), spine=(-4, 0, 0))),
+        (8, st(sword=S((0, -0.06, 1.62), (0, 0.60, 0.80), (0, -1, 0)), hips=(0, 0.04, 0.03), spine=(-12, 0, 0),
+               chest=(-5, 0, 0), neck=(6, 0, 0), foot_R=(0, -0.16, 0.05), footR_rot=(-10, 0, 0), footL_rot=(24, 0, 0))),
+        (10, st(sword=S((0, -0.10, 1.64), (0, 0.42, 0.91), (0, -1, 0)), hips=(0, -0.04, 0.0), spine=(-8, 0, 0),
+                chest=(-4, 0, 0), neck=(5, 0, 0), foot_R=(0, -0.28, 0.06), footR_rot=(-14, 0, 0), footL_rot=(30, 0, 0))),
+        (12, st(sword=S((0, -0.32, 1.50), (0, -0.50, 0.87), (0, -0.8, -0.6)), hips=(0, -0.12, -0.08), spine=(6, 0, 0),
+                chest=(2, 0, 0), neck=(-2, 0, 0), foot_R=(0, -0.36, 0), footL_rot=(34, 0, 0))),
+        (13, st(sword=S((0, -0.46, 1.08), (0, -0.97, -0.25), (0, 0, -1)), hips=(0, -0.15, -0.15), spine=(18, 0, 0),
+                chest=(6, 0, 0), neck=(-10, 0, 0), foot_R=(0, -0.36, 0), footL_rot=(36, 0, 0))),
+        (15, st(sword=S((0, -0.41, 0.90), (0, -0.70, -0.71), (0, 0.3, -1)), hips=(0, -0.16, -0.18), spine=(25, 0, 0),
+                chest=(7, 0, 0), neck=(-14, 0, 0), foot_R=(0, -0.36, 0), foot_L=(0, -0.03, 0.02), footL_rot=(30, 0, 0))),
+        (18, st(sword=S((0, -0.37, 0.83), (0, -0.50, -0.86), (0, 0.4, -1)), hips=(0, -0.16, -0.19), spine=(28, 0, 0),
+                chest=(7, 0, 0), neck=(-16, 0, 0), foot_R=(0, -0.36, 0), foot_L=(0, -0.06, 0), footL_rot=(20, 0, 0))),
+        (22, st(sword=S((0, -0.38, 0.92), (0, -0.72, -0.69), (0, 0.3, -1)), hips=(0, -0.15, -0.16), spine=(22, 0, 0),
+                chest=(5, 0, 0), neck=(-12, 0, 0), foot_R=(0, -0.36, 0), foot_L=(0, -0.06, 0), footL_rot=(16, 0, 0))),
+        (28, st(sword=S((0, -0.34, 0.98), (0, -0.82, -0.50), (0, 0.3, -1)), hips=(0, -0.11, -0.11), spine=(14, 0, 0),
+                chest=(3, 0, 0), neck=(-7, 0, 0), foot_R=(0, -0.32, 0), foot_L=(0, -0.04, 0), footL_rot=(14, 0, 0))),
+        (40, st()),
+    ]))
+    # --- 横薙ぎ
     acts.append(new_action(arm, "Slash_Horizontal", [
-        (0, dict()),
-        (6, dict(sword=S((-0.26, -0.02, 1.20), (-0.65, 0.60, 0.45), (0.4, -0.9, 0)), hips=(0, 0.03, -0.03),
-                 hips_rot=(0, 0, -20), chest=(0, 0, -44), spine=(0, 4, -10), neck=(0, 0, 18))),
-        (9, dict(sword=S((-0.30, 0.05, 1.18), (-0.55, 0.75, 0.35), (0.4, -0.9, 0)), hips=(0, 0.04, -0.04),
-                 hips_rot=(0, 0, -24), chest=(0, 0, -52), spine=(0, 5, -12), neck=(0, 0, 22))),
-        (11, dict(sword=S((-0.20, -0.32, 1.14), (-0.85, -0.50, 0.05), (0.3, -1, 0)), hips=(0, -0.03, -0.06),
-                  hips_rot=(0, 0, -10), chest=(2, 0, -20), spine=(0, 2, -4), foot_R=(0, -0.10, 0.05))),
-        (13, dict(sword=S((0.0, -0.44, 1.12), (-0.10, -1.0, 0.05), (1, 0, 0)), hips=(0, -0.07, -0.08),
-                  hips_rot=(0, 0, 5), chest=(4, 0, 4), foot_R=(0, -0.18, 0))),
-        (15, dict(sword=S((0.20, -0.30, 1.12), (0.85, -0.50, 0.05), (0.4, 1, 0)), hips=(0, -0.07, -0.09),
-                  hips_rot=(0, 0, 18), chest=(4, 0, 34), spine=(0, -2, 8), foot_R=(0, -0.18, 0))),
-        (18, dict(sword=S((0.26, -0.12, 1.13), (0.85, 0.45, 0.10), (-0.3, 1, 0)), hips=(0, -0.07, -0.09),
-                  hips_rot=(0, 0, 24), chest=(4, 0, 50), spine=(0, -3, 12), foot_R=(0, -0.18, 0))),
-        (24, dict(sword=S((0.20, -0.20, 1.10), (0.80, -0.30, 0.10), (0.4, 1, 0)), hips=(0, -0.06, -0.08),
-                  hips_rot=(0, 0, 16), chest=(4, 0, 34), spine=(0, -2, 8), foot_R=(0, -0.18, 0))),
-        (36, dict()),
-    ], smooth=True))
-
-    # --- 歩き / 走り(その場ループ)
-    def gait(name, length, step, stride, lift, bob, base_z, lean, sw, narrow):
-        keys = []
-        for f in range(0, length + 1, step):
-            ph = 2 * math.pi * f / length
-            fl = (-narrow, -stride * math.cos(ph), lift * max(0.0, -math.sin(ph)))
-            fr = (narrow, stride * math.cos(ph), lift * max(0.0, math.sin(ph)))
-            hips = (0.02 * math.sin(ph), 0, base_z - bob * math.cos(2 * ph))
-            keys.append((f, dict(hips=hips, hips_rot=(0, 0, 6 * math.cos(ph)), spine=(lean, 0, 0),
-                                 chest=(0, 0, -5 * math.cos(ph)), neck=(-lean * 0.6, 0, 0),
-                                 foot_L=fl, foot_R=fr,
-                                 sword=S(P0 + Vector(sw) + Vector((0, 0, 0.012 * math.cos(2 * ph))),
-                                         C["u"], C["hint"]))))
-        return new_action(arm, name, keys, cyclic=True)
-    acts.append(gait("Walk", 32, 4, 0.14, 0.07, 0.015, -0.03, 3, (0, 0, 0), 0.05))
-    acts.append(gait("Run", 20, 2, 0.26, 0.15, 0.03, -0.07, 14, (0, -0.06, -0.06), 0.085))
-
-    # --- しゃがみ
-    low = dict(hips=(0, 0.07, -0.36), spine=(26, 0, 0), chest=(4, 0, 0), neck=(-22, 0, 0),
-               sword=S(P0 + Vector((0, -0.10, -0.20)), (0, -0.62, 0.78), (0, 0, -1)))
-    acts.append(new_action(arm, "Crouch", [(0, dict()), (10, low), (30, low), (42, dict())]))
-
-    # --- 回避(右へのサイドステップ)
-    acts.append(new_action(arm, "Dodge", [
-        (0, dict()),
-        (5, dict(hips=(0, 0, -0.08), spine=(6, 0, 0))),
-        (9, dict(hips=(-0.25, 0, -0.10), spine=(6, -10, 0), foot_R=(-0.30, 0, 0.12))),
-        (13, dict(hips=(-0.45, 0.05, -0.16), hips_rot=(0, -6, 0), spine=(10, -14, 0), neck=(0, 10, 0),
-                  foot_R=(-0.55, 0, 0))),
-        (17, dict(hips=(-0.48, 0.05, -0.14), hips_rot=(0, -4, 0), spine=(8, -8, 0), neck=(0, 6, 0),
-                  foot_R=(-0.55, 0, 0), foot_L=(-0.30, 0, 0.08))),
-        (22, dict(hips=(-0.45, 0.03, -0.10), spine=(6, -2, 0), foot_R=(-0.55, 0, 0), foot_L=(-0.38, 0, 0))),
-        (30, dict(hips=(-0.45, 0, -0.04), foot_R=(-0.55, 0, 0), foot_L=(-0.38, 0, 0))),
-        (36, dict(hips=(-0.22, 0, -0.06), foot_R=(-0.55, 0, 0), foot_L=(-0.10, 0, 0.08))),
-        (42, dict(hips=(0, 0, -0.04), foot_R=(-0.20, 0, 0.08), foot_L=(0, 0, 0))),
-        (48, dict()),
+        (0, st()),
+        (4, st(sword=S((-0.16, -0.12, 1.16), (-0.45, 0.20, 0.60), (0.4, -0.9, 0)), hips=(0, 0.02, -0.01),
+               hips_rot=(0, 0, -10), chest=(0, 0, -22), spine=(0, 2, -5), neck=(0, 0, 10))),
+        (8, st(sword=S((-0.30, 0.05, 1.18), (-0.55, 0.75, 0.35), (0.4, -0.9, 0)), hips=(0, 0.04, -0.04),
+               hips_rot=(0, 0, -26), chest=(0, 0, -52), spine=(0, 5, -12), neck=(0, 0, 24), head=(0, 0, 6),
+               footL_rot=(20, 0, 0))),
+        (10, st(sword=S((-0.30, -0.04, 1.17), (-0.70, 0.55, 0.35), (0.4, -0.9, 0)), hips=(0, -0.03, -0.06),
+                hips_rot=(0, 0, -8), chest=(0, 0, -42), spine=(0, 4, -9), neck=(0, 0, 18),
+                foot_R=(0.04, -0.22, 0.04), footR_rot=(-10, 0, 0))),
+        (12, st(sword=S((-0.18, -0.34, 1.13), (-0.85, -0.50, 0.05), (0.3, -1, 0)), hips=(0, -0.08, -0.09),
+                hips_rot=(0, 0, 6), chest=(2, 0, -14), spine=(0, 2, -3), neck=(0, 0, 6),
+                foot_R=(0.05, -0.30, 0), footL_rot=(30, 0, 0))),
+        (13, st(sword=S((0.0, -0.46, 1.12), (-0.10, -1.0, 0.05), (1, 0, 0)), hips=(0, -0.10, -0.11),
+                hips_rot=(0, 0, 12), chest=(4, 0, 6), neck=(0, 0, -4), foot_R=(0.05, -0.30, 0), footL_rot=(34, 0, 0))),
+        (15, st(sword=S((0.20, -0.32, 1.12), (0.85, -0.50, 0.05), (0.4, 1, 0)), hips=(0, -0.10, -0.12),
+                hips_rot=(0, 0, 24), chest=(4, 0, 36), spine=(0, -2, 8), neck=(0, 0, -18),
+                foot_R=(0.05, -0.30, 0), foot_L=(0.03, -0.02, 0.02), footL_rot=(30, 0, 0))),
+        (18, st(sword=S((0.26, -0.12, 1.13), (0.85, 0.45, 0.10), (-0.3, 1, 0)), hips=(0, -0.10, -0.12),
+                hips_rot=(0, 0, 30), chest=(4, 0, 52), spine=(0, -3, 12), neck=(0, 0, -26),
+                foot_R=(0.05, -0.30, 0), foot_L=(0.04, -0.04, 0), footL_rot=(22, 0, 0))),
+        (22, st(sword=S((0.22, -0.20, 1.10), (0.80, -0.30, 0.10), (0.4, 1, 0)), hips=(0, -0.09, -0.11),
+                hips_rot=(0, 0, 22), chest=(4, 0, 36), spine=(0, -2, 8), neck=(0, 0, -18),
+                foot_R=(0.05, -0.30, 0), foot_L=(0.04, -0.04, 0), footL_rot=(16, 0, 0))),
+        (28, st(sword=S((0.14, -0.28, 1.05), (0.65, -0.65, 0.20), (0.5, 0.8, 0)), hips=(0, -0.07, -0.08),
+                hips_rot=(0, 0, 12), chest=(3, 0, 20), spine=(0, -1, 4), neck=(0, 0, -10),
+                foot_R=(0.03, -0.28, 0), foot_L=(0.02, -0.02, 0), footL_rot=(14, 0, 0))),
+        (40, st()),
     ]))
-    # --- ゲーム用:待機・被弾・倒れ
-    acts.append(new_action(arm, "Idle", [
-        (f, dict(hips=(0, 0, -0.012 - 0.008 * math.cos(2 * math.pi * f / 60)),
-                 chest=(-1.5 * math.cos(2 * math.pi * f / 60), 0, 0),
-                 sword=S(P0 + Vector((0, 0, 0.008 * math.cos(2 * math.pi * f / 60))), C["u"], C["hint"])))
-        for f in range(0, 61, 10)], cyclic=True))
+
+    # ===== 待機:低い構え、呼吸、重心のゆらぎ、切先のわずかな動き
+    idle = []
+    for f in range(0, 121, 10):
+        b = 2 * math.pi * f / 60      # 呼吸 2 秒周期
+        w = 2 * math.pi * f / 120     # 重心移動 4 秒周期
+        idle.append((f, st(hips=(0.012 * math.sin(w), 0, -0.006 - 0.006 * math.cos(b)), hips_rot=(0, 0, 1.5 * math.sin(w)),
+                           chest=(-1.6 * math.cos(b), 0, -1.0 * math.sin(w)), neck=(0.8 * math.cos(b), 0, 0.8 * math.sin(w)),
+                           sword=S(P0 + Vector((0.006 * math.sin(w * 2), 0, 0.008 * math.cos(b))),
+                                   (C["u"] + Vector((0.02 * math.sin(w), 0, 0.015 * math.cos(b)))), C["hint"]))))
+    acts.append(new_action(arm, "Idle", idle, cyclic=True))
+
+    # ===== 歩き:すり足(両手で中段のまま、低く滑るように)
+    walk = []
+    WL = 32
+    for f in range(0, WL + 1, 2):
+        ph = 2 * math.pi * f / WL
+        c, sn = math.cos(ph), math.sin(ph)
+        fl = (-0.05, -0.22 * c, 0.035 * max(0.0, -sn))
+        fr = (0.05, 0.22 * c, 0.035 * max(0.0, sn))
+        walk.append((f, dict(
+            hips=(0.018 * sn, 0, -0.085 - 0.012 * math.cos(2 * ph)), hips_rot=(0, 2.0 * sn, 6 * c),
+            spine=(6, 0, 0), chest=(0, 0, -4 * c), neck=(-4, 0, 2.5 * c),
+            foot_L=fl, foot_R=fr, footL_rot=(6 - 10 * c if sn < 0 else 4 + 6 * c, 0, 0),
+            footR_rot=(6 + 10 * c if sn > 0 else 4 - 6 * c, 0, 0),
+            sword=S(P0 + Vector((0.01 * sn, 0, 0.008 * math.cos(2 * ph))), C["u"], C["hint"]))))
+    acts.append(new_action(arm, "Walk", walk, cyclic=True))
+
+    # ===== 走り:前傾した疾走。刀は右手で低く後ろへ流し、左腕は振る。踵から着いてつま先で蹴る
+    run = []
+    RL = 24
+    for f in range(0, RL + 1, 2):
+        ph = 2 * math.pi * f / RL
+        c, sn = math.cos(ph), math.sin(ph)
+        lift_L = 0.24 * max(0.0, -sn) ** 0.8
+        lift_R = 0.24 * max(0.0, sn) ** 0.8
+        run.append((f, dict(
+            hips=(0.015 * sn, 0.04, -0.12 + 0.035 * math.cos(2 * ph)), hips_rot=(3, 3 * sn, 9 * c),
+            spine=(17, 0, 0), chest=(4, 0, -15 * c), neck=(-13, 0, 7 * c), head=(-5, 0, 3 * c),
+            foot_L=(-0.085, -0.38 * c, lift_L), foot_R=(0.085, 0.38 * c, lift_R),
+            footL_rot=(12.5 - 27.5 * c, 0, 0), footR_rot=(12.5 + 27.5 * c, 0, 0),
+            ikL=0.0,
+            armL=((38 * c + 10, -14, 4), (-30 + 8 * c, 0, 40)),
+            sword=S(None, (-0.22, 0.72, -0.66), (0, 0.4, -1), H=(-0.25, 0.10 + 0.06 * c, 0.93 + 0.02 * math.cos(2 * ph))))))
+    acts.append(new_action(arm, "Run", run, cyclic=True))
+
+    # ===== しゃがみ:深く沈み、刀を体に引き寄せる
+    low = st(hips=(0, 0.07, -0.38), spine=(30, 0, 0), chest=(6, 0, 0), neck=(-24, 0, 0), head=(-6, 0, 0),
+             foot_R=(0.0, -0.18, 0), foot_L=(0.0, 0.10, 0), footL_rot=(34, 0, 0),
+             sword=S(P0 + Vector((0, -0.08, -0.24)), (0, -0.55, 0.83), (0, 0, -1)))
+    acts.append(new_action(arm, "Crouch", [
+        (0, st()), (6, st(hips=(0, 0.06, -0.32), spine=(26, 0, 0), neck=(-20, 0, 0), footL_rot=(30, 0, 0),
+                          foot_R=(0, -0.17, 0), foot_L=(0, 0.10, 0),
+                          sword=S(P0 + Vector((0, -0.08, -0.20)), (0, -0.6, 0.8), (0, 0, -1)))),
+        (10, low), (30, low), (36, st(hips=(0, 0.02, -0.06), spine=(8, 0, 0))), (42, st())]))
+
+    # ===== 回避:低く鋭い横への踏み替え(ゲーム側で胴ごと右へ 1m 移動させる=ルートモーション)
+    # 足の値はアーマチュア空間(体と一緒に動く)なので、地面に残る足は移動分だけ逆へずらす
+    D = {0: 0, 2: 0, 4: 0.18, 6: 0.52, 8: 0.84, 10: 0.98, 12: 1.0}
+    dodge = [(0, st())]
+    dodge.append((2, st(hips=(0.03, 0, -0.06), spine=(4, 4, 0), neck=(0, -4, 0))))
+    dodge.append((4, st(hips=(-0.05, 0, -0.12), hips_rot=(0, -6, 0), spine=(8, -10, 0), neck=(0, 8, 0),
+                        foot_R=(-0.10, -0.13, 0.10), foot_L=(D[4], 0.07, 0), footL_rot=(18, 0, 0))))
+    dodge.append((6, st(hips=(-0.08, 0, -0.16), hips_rot=(0, -9, 0), spine=(10, -14, 0), neck=(0, 12, 0),
+                        foot_R=(-0.12, -0.13, 0.12), foot_L=(D[6], 0.07, 0), footL_rot=(30, 0, 0))))
+    dodge.append((8, st(hips=(-0.05, 0, -0.20), hips_rot=(0, -6, 0), spine=(12, -10, 0), neck=(0, 9, 0),
+                        foot_R=(-0.04, -0.13, 0), foot_L=(0.30, 0.07, 0.10), footL_rot=(20, 0, 0))))
+    dodge.append((11, st(hips=(-0.02, 0, -0.18), hips_rot=(0, -3, 0), spine=(10, -5, 0), neck=(0, 4, 0),
+                         foot_R=(0.0, -0.13, 0), foot_L=(0.02, 0.07, 0.02), footL_rot=(16, 0, 0))))
+    dodge.append((16, st(hips=(0, 0, -0.10), spine=(6, 0, 0))))
+    dodge.append((26, st()))
+    acts.append(new_action(arm, "Dodge", dodge))
+
+    # ===== 被弾:頭が弾かれ、上体がのけぞり、後ろ足で踏みとどまる
     acts.append(new_action(arm, "Hit", [
-        (0, dict()),
-        (4, dict(hips=(0, 0.08, -0.03), hips_rot=(-6, 0, 0), spine=(-14, 0, 6), neck=(-10, 0, 0),
-                 sword=S(P0 + Vector((0.05, 0.12, 0.10)), (0.1, -0.5, 0.86), (0, 0, -1)), foot_L=(0, 0.04, 0))),
-        (10, dict(hips=(0, 0.10, -0.06), spine=(-6, 0, 3), sword=S(P0 + Vector((0.03, 0.10, 0.0)), (0.05, -0.7, 0.7), (0, 0, -1)),
-                  foot_L=(0, 0.08, 0), foot_R=(0, 0.04, 0))),
-        (20, dict()),
+        (0, st()),
+        (3, st(hips=(0, 0.08, -0.02), hips_rot=(-6, 0, 4), spine=(-16, 0, 8), chest=(-6, 0, 6), neck=(-18, 0, 10),
+               head=(-8, 0, 6), sword=S(P0 + Vector((0.06, 0.14, 0.12)), (0.15, -0.45, 0.88), (0, 0, -1)))),
+        (7, st(hips=(0, 0.14, -0.08), hips_rot=(-3, 0, 2), spine=(-8, 0, 4), neck=(-8, 0, 4),
+               foot_L=(0, 0.24, 0.06), sword=S(P0 + Vector((0.04, 0.12, 0.04)), (0.08, -0.65, 0.75), (0, 0, -1)))),
+        (11, st(hips=(0, 0.13, -0.11), spine=(4, 0, 0), foot_L=(0, 0.26, 0), footL_rot=(6, 0, 0),
+                sword=S(P0 + Vector((0.02, 0.08, -0.02)), C["u"], C["hint"]))),
+        (22, st()),
     ]))
+    # ===== 倒れ:膝から崩れ、前のめりに伏す
     acts.append(new_action(arm, "Death", [
-        (0, dict()),
-        (6, dict(hips=(0, 0.06, -0.06), spine=(-10, 0, 0), neck=(-12, 0, 0),
-                 sword=S(P0 + Vector((0.05, 0.12, 0.05)), (0.2, -0.4, 0.9), (0, 0, -1)))),
-        (18, dict(hips=(0, -0.05, -0.45), spine=(24, 0, -6), neck=(15, 0, 0),
-                  sword=S((0.25, -0.30, 0.30), (0.5, -0.8, -0.3), (0, 0, -1)), sword_follow=False)),
+        (0, st()),
+        (5, st(hips=(0, 0.06, -0.04), spine=(-12, 0, 4), neck=(-16, 0, 0),
+               sword=S(P0 + Vector((0.05, 0.12, 0.05)), (0.2, -0.4, 0.9), (0, 0, -1)))),
+        (14, dict(hips=(0, -0.02, -0.40), spine=(16, 0, -6), neck=(10, 0, 0), foot_R=(0, -0.13, 0), foot_L=(0, 0.07, 0),
+                  footL_rot=(30, 0, 0), sword=S((0.24, -0.30, 0.40), (0.5, -0.8, -0.3), (0, 0, -1)), sword_follow=False)),
+        (22, dict(hips=(0, -0.08, -0.56), spine=(24, 0, -8), neck=(18, 0, 0), foot_R=(0, -0.13, 0), foot_L=(0, 0.07, 0),
+                  footL_rot=(40, 0, 0), sword=S((0.28, -0.40, 0.12), (0.55, -0.83, 0.0), (0, 0, -1)), sword_follow=False)),
         (34, dict(hips=(0.05, -0.32, -0.66), hips_rot=(62, 0, 8), spine=(25, 0, -8), neck=(20, 0, 0),
                   sword=S((0.30, -0.45, 0.05), (0.55, -0.83, 0.0), (0, 0, -1)), sword_follow=False)),
         (60, dict(hips=(0.05, -0.34, -0.68), hips_rot=(64, 0, 8), spine=(25, 0, -8), neck=(22, 0, 0),
@@ -1390,7 +1485,7 @@ def build_actions(arm):
     arm.animation_data.action = acts[0]
     scene = bpy.context.scene
     scene.render.fps = 30
-    scene.frame_start, scene.frame_end = 0, 44
+    scene.frame_start, scene.frame_end = 0, 40
     pose_rig(arm)
     return acts
 
@@ -1512,12 +1607,19 @@ def main(pose=None):
             export_glb(arm, os.path.join(OUT_DIR, "game", "samurai.glb"))
             return
 
-    # 身長チェック(足裏〜頭頂: 髪・頭部のみで計測)
+    # 身長チェック(足裏〜頭頂: 髪・頭部のみで計測)。リグ付きは休止姿勢で測る
+    if anim:
+        saved = arm.animation_data.action
+        arm.animation_data.action = None
+        pose_rig(arm)
+        bpy.context.view_layer.update()
     dg = bpy.context.evaluated_depsgraph_get()
     top = max((o.matrix_world @ Vector(v)).z
               for o in c_body.objects if o.type == "MESH"
               for v in o.evaluated_get(dg).bound_box)
     print(f"[samurai] body height = {top * 100:.1f} cm")
+    if anim:
+        assign_action(arm, saved)
 
     blend = os.path.join(OUT_DIR, f"samurai{suffix}.blend")
     bpy.ops.wm.save_as_mainfile(filepath=blend)
