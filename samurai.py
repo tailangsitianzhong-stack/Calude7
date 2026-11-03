@@ -1311,6 +1311,31 @@ def build_actions(arm):
         (42, dict(hips=(0, 0, -0.04), foot_R=(-0.20, 0, 0.08), foot_L=(0, 0, 0))),
         (48, dict()),
     ]))
+    # --- ゲーム用:待機・被弾・倒れ
+    acts.append(new_action(arm, "Idle", [
+        (f, dict(hips=(0, 0, -0.012 - 0.008 * math.cos(2 * math.pi * f / 60)),
+                 chest=(-1.5 * math.cos(2 * math.pi * f / 60), 0, 0),
+                 sword=S(P0 + Vector((0, 0, 0.008 * math.cos(2 * math.pi * f / 60))), C["u"], C["hint"])))
+        for f in range(0, 61, 10)], cyclic=True))
+    acts.append(new_action(arm, "Hit", [
+        (0, dict()),
+        (4, dict(hips=(0, 0.08, -0.03), hips_rot=(-6, 0, 0), spine=(-14, 0, 6), neck=(-10, 0, 0),
+                 sword=S(P0 + Vector((0.05, 0.12, 0.10)), (0.1, -0.5, 0.86), (0, 0, -1)), foot_L=(0, 0.04, 0))),
+        (10, dict(hips=(0, 0.10, -0.06), spine=(-6, 0, 3), sword=S(P0 + Vector((0.03, 0.10, 0.0)), (0.05, -0.7, 0.7), (0, 0, -1)),
+                  foot_L=(0, 0.08, 0), foot_R=(0, 0.04, 0))),
+        (20, dict()),
+    ]))
+    acts.append(new_action(arm, "Death", [
+        (0, dict()),
+        (6, dict(hips=(0, 0.06, -0.06), spine=(-10, 0, 0), neck=(-12, 0, 0),
+                 sword=S(P0 + Vector((0.05, 0.12, 0.05)), (0.2, -0.4, 0.9), (0, 0, -1)))),
+        (18, dict(hips=(0, -0.05, -0.45), spine=(24, 0, -6), neck=(15, 0, 0),
+                  sword=S((0.25, -0.30, 0.30), (0.5, -0.8, -0.3), (0, 0, -1)), sword_follow=False)),
+        (34, dict(hips=(0.05, -0.32, -0.66), hips_rot=(62, 0, 8), spine=(25, 0, -8), neck=(20, 0, 0),
+                  sword=S((0.30, -0.45, 0.05), (0.55, -0.83, 0.0), (0, 0, -1)), sword_follow=False)),
+        (60, dict(hips=(0.05, -0.34, -0.68), hips_rot=(64, 0, 8), spine=(25, 0, -8), neck=(22, 0, 0),
+                  sword=S((0.30, -0.45, 0.03), (0.55, -0.83, 0.0), (0, 0, -1)), sword_follow=False)),
+    ]))
     arm.animation_data.action = acts[0]
     scene = bpy.context.scene
     scene.render.fps = 30
@@ -1373,8 +1398,45 @@ def render_motion_previews(arm, acts, out_dir):
     sheet.save(os.path.join(out_dir, "motions_sheet.png"))
 
 
+def export_glb(arm, path):
+    """Web(three.js)用 GLB:プロシージャルノードを外して基本色だけに、重いメッシュは間引く"""
+    for mat in bpy.data.materials:
+        if not mat.node_tree:
+            continue
+        nodes, links = mat.node_tree.nodes, mat.node_tree.links
+        bsdf = nodes.get("Principled BSDF")
+        if not bsdf:
+            continue
+        for inp in ("Base Color", "Roughness", "Normal"):
+            for l in list(bsdf.inputs[inp].links):
+                links.remove(l)
+        for n in [n for n in nodes if n.type not in ("BSDF_PRINCIPLED", "OUTPUT_MATERIAL")]:
+            nodes.remove(n)
+    objs = [o for o in bpy.data.objects if o is arm or o.parent is arm or (o.parent and o.parent.parent is arm)]
+    for o in objs:
+        if o.type == "MESH":
+            if "Subsurf" in o.modifiers:
+                o.modifiers["Subsurf"].levels = 0
+            n = len(o.data.polygons)
+            if n > 3000:
+                d = o.modifiers.new("Decimate", "DECIMATE")
+                d.ratio = max(0.08, 3000 / n)
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = arm
+    pose_rig(arm)
+    arm.animation_data.action = None
+    bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True, export_apply=True,
+                              export_animations=True, export_animation_mode="ACTIONS",
+                              export_force_sampling=True, export_def_bones=False,
+                              export_frame_step=1, export_yup=True)
+    print(f"[samurai] exported {path}")
+
+
 def main(pose=None):
-    anim = pose == "anim"
+    glb = pose == "glb"
+    anim = pose in ("anim", "glb")
     if pose:
         set_pose("katana" if anim else pose)
     suffix = "_anim" if anim else ("" if POSE == "fan" else "_" + POSE)
@@ -1394,6 +1456,10 @@ def main(pose=None):
         arm = build_rig([c_body, c_armor, c_kabuto, c_weap])
         acts = build_actions(arm)
         assign_action(arm, acts[0])
+        if glb:
+            os.makedirs(os.path.join(OUT_DIR, "game"), exist_ok=True)
+            export_glb(arm, os.path.join(OUT_DIR, "game", "samurai.glb"))
+            return
 
     # 身長チェック(足裏〜頭頂: 髪・頭部のみで計測)
     dg = bpy.context.evaluated_depsgraph_get()
