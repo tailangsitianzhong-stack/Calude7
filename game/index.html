@@ -80,6 +80,7 @@ button:focus-visible { outline: 2px solid var(--kin); outline-offset: 3px; }
 .btns { position: absolute; right: max(18px, env(safe-area-inset-right, 0px)); bottom: calc(env(safe-area-inset-bottom, 0px) + 22px); display: grid; grid-template-columns: repeat(4, 56px); gap: 10px; pointer-events: auto; }
 .btns button { width: 56px; height: 56px; border-radius: 50%; border: 1px solid rgba(239,230,210,.45); background: rgba(20,19,19,.45); color: var(--paper); font-family: var(--display); font-weight: 800; font-size: 15px; }
 .btns button.k { background: rgba(184,50,42,.75); }
+.flash { position: absolute; inset: 0; background: #fff8ea; opacity: 0; mix-blend-mode: screen; }
 .lock { position: absolute; transform: translate(-50%, -50%); width: 26px; height: 26px; border: 2px solid var(--kin); border-radius: 50%; box-shadow: 0 0 0 3px rgba(20,19,19,.35); }
 .lock::after { content: ""; position: absolute; inset: 9px; background: var(--shu); border-radius: 50%; }
 @media (prefers-reduced-motion: reduce) { .call, .pop, .bar i, .bar b { transition: none; } }
@@ -99,6 +100,7 @@ button:focus-visible { outline: 2px solid var(--kin); outline-offset: 3px; }
       <div class="bar"><b id="eLag"></b><i id="eHp"></i></div>
     </div>
   </div>
+  <div class="flash" id="flash"></div>
   <div class="call" id="call"></div>
   <div class="lock" id="lock" hidden></div>
   <div class="keys">
@@ -457,17 +459,23 @@ function startAudio() {
   lfo.connect(lg).connect(g.gain); lfo.start();
   src.connect(lp).connect(g).connect(master); src.start();
 }
-function sfx(kind) {
+function sfx(kind, pitch = 1) {
   if (!actx) return;
   const t = actx.currentTime;
-  if (kind === 'swish') {
+  if (kind === 'swish') {   // ヒュッ:帯域を一気に掃き上げて切る
     const s = actx.createBufferSource(); s.buffer = noiseBuffer(0.4);
-    const f = actx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 1.6;
-    f.frequency.setValueAtTime(600, t); f.frequency.exponentialRampToValueAtTime(3200, t + 0.18);
-    const g = actx.createGain(); g.gain.setValueAtTime(0.0, t); g.gain.linearRampToValueAtTime(0.9, t + 0.06); g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    const f = actx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 3.2;
+    f.frequency.setValueAtTime(500 * pitch, t); f.frequency.exponentialRampToValueAtTime(5200 * pitch, t + 0.11);
+    f.frequency.exponentialRampToValueAtTime(1800 * pitch, t + 0.2);
+    const g = actx.createGain(); g.gain.setValueAtTime(0.0, t); g.gain.linearRampToValueAtTime(1.6, t + 0.05); g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
     s.connect(f).connect(g).connect(master); s.start(t); s.stop(t + 0.4);
-  } else if (kind === 'hit') {
-    const o = actx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(130, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.25);
+  } else if (kind === 'hit') {   // ザンッ:裂ける音+低い衝撃
+    const c = actx.createBufferSource(); c.buffer = noiseBuffer(0.3);
+    const cf = actx.createBiquadFilter(); cf.type = 'bandpass'; cf.Q.value = 0.8;
+    cf.frequency.setValueAtTime(3800, t); cf.frequency.exponentialRampToValueAtTime(700, t + 0.16);
+    const cg = actx.createGain(); cg.gain.setValueAtTime(1.3, t); cg.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    c.connect(cf).connect(cg).connect(master); c.start(t); c.stop(t + 0.3);
+    const o = actx.createOscillator(); o.type = 'sine'; o.frequency.setValueAtTime(130 * pitch, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.25);
     const g = actx.createGain(); g.gain.setValueAtTime(0.9, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
     o.connect(g).connect(master); o.start(t); o.stop(t + 0.4);
     const s = actx.createBufferSource(); s.buffer = noiseBuffer(0.3); const f = actx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 900;
@@ -535,9 +543,9 @@ function call(text, sub = '', dur = 1.4) {
 
 // ------------------------------------------------------------------ fighters
 const ATK = {
-  diag:  { clip: 'Slash_Diagonal',   speed: 1.55, a0: 13, a1: 22, end: 33, dmg: 20, arc: 80, lunge: [7, 16, 0.45], name: '袈裟斬り' },
-  horiz: { clip: 'Slash_Horizontal', speed: 1.5,  a0: 14, a1: 23, end: 33, dmg: 17, arc: 110, lunge: [8, 17, 0.35], name: '横薙ぎ', horiz: true },
-  over:  { clip: 'Slash_Overhead',   speed: 1.25, a0: 13, a1: 19, end: 33, dmg: 30, arc: 50, lunge: [9, 16, 0.6], name: '唐竹割り' },
+  diag:  { clip: 'Slash_Diagonal',   speed: 1.3,  a0: 11, a1: 16, end: 27, dmg: 20, arc: 80,  lunge: [9, 14, 0.55], name: '袈裟斬り', stop: 0.085, pitch: 1.0 },
+  horiz: { clip: 'Slash_Horizontal', speed: 1.25, a0: 11, a1: 16, end: 27, dmg: 17, arc: 110, lunge: [9, 14, 0.45], name: '横薙ぎ', horiz: true, stop: 0.08, pitch: 0.85 },
+  over:  { clip: 'Slash_Overhead',   speed: 1.05, a0: 11, a1: 15, end: 27, dmg: 30, arc: 50,  lunge: [9, 14, 0.7], name: '唐竹割り', stop: 0.15, pitch: 0.7 },
 };
 const WADE = -0.5;  // 膝まで浸かれる深さまで歩ける
 function walkable(x, z) {
@@ -554,6 +562,7 @@ class Fighter {
       if (o.isMesh) {
         o.castShadow = true; o.receiveShadow = true; o.frustumCulled = false;
         o.material = o.material.clone();
+        if (o.material.emissive) (this.mats ||= []).push(o.material);
         opts.tint?.(o);
       }
       if (o.isBone) {
@@ -620,11 +629,11 @@ class Fighter {
 
   attack(type) {
     if (this.state === 'dead' || (this.busy && this.state !== 'attack')) return false;
-    if (this.state === 'attack') { if (this.frame() > ATK[this.atk.type].a1) this.queued = type; return false; }
+    if (this.state === 'attack') { if (this.frame() >= ATK[this.atk.type].a0) this.queued = type; return false; }
     const A = ATK[type];
     if (this.foe && this.pos.distanceTo(this.foe.pos) < 5) this.yaw = Math.atan2(this.foe.pos.x - this.pos.x, this.foe.pos.z - this.pos.z);
-    this.state = 'attack'; this.atk = { type, hit: false, swished: false };
-    this.play(A.clip, { once: true, speed: A.speed, fade: 0.08 });
+    this.state = 'attack'; this.atk = { type, hit: false, swished: false, planted: false };
+    this.play(A.clip, { once: true, speed: A.speed, fade: 0.05 });
     this.onAttack?.(type);
     return true;
   }
@@ -651,7 +660,8 @@ class Fighter {
     this.trailPts.length = 0;
     if (this.hp <= 0) { this.state = 'dead'; this.play('Death', { once: true, speed: 1, fade: 0.1 }); this.onDeath?.(); return; }
     this.state = 'hit'; this.play('Hit', { once: true, speed: 1.2, fade: 0.05 });
-    this.knock = from.forward().multiplyScalar(2.2);
+    this.knock = from.forward().multiplyScalar(3.4);
+    this.flash = 0.16;
   }
 
   update(dt, foe, move) {
@@ -661,10 +671,18 @@ class Fighter {
     if (this.state === 'attack') {
       const A = ATK[this.atk.type];
       if (f >= A.lunge[0] && f <= A.lunge[1]) this.pos.addScaledVector(this.forward(), A.lunge[2] * A.speed * FPS / (A.lunge[1] - A.lunge[0]) * dt * (this.pos.distanceTo(foe.pos) > 1.3 ? 1 : 0));
-      if (!this.atk.swished && f >= A.a0 - 2) { this.atk.swished = true; sfx('swish'); }
-      if (f >= A.end) {
-        this.state = 'idle'; this.play('Idle', { fade: 0.25 });
-        if (this.queued) { const q = this.queued; this.queued = null; this.attack(q); }
+      if (!this.atk.swished && f >= A.a0 - 1.5) {
+        this.atk.swished = true; sfx('swish', A.pitch);
+        if (this.isPlayer) kick = 1;
+      }
+      if (!this.atk.planted && f >= A.a0 + 2) {   // 踏み込みの砂煙
+        this.atk.planted = true;
+        burst(this.pos.clone().addScaledVector(this.forward(), 0.3).setY(this.pos.y + 0.05), 12, '#cdbb92', 2.4, 0.05, 0.55, -4);
+      }
+      if (this.queued && f >= A.a1 + 3) {          // 連撃:残心を切って次の太刀へ
+        const q = this.queued; this.queued = null; this.state = 'idle'; this.attack(q);
+      } else if (f >= A.end) {
+        this.state = 'idle'; this.play('Idle', { fade: 0.3 });
       }
     } else if (this.state === 'dodge' && f >= 36) { this.state = 'idle'; this.play('Idle', { fade: 0.2 }); }
     else if (this.state === 'hit' && f >= 18) { this.state = 'idle'; this.play('Idle', { fade: 0.2 }); }
@@ -713,6 +731,12 @@ class Fighter {
         this.yaw += dy * Math.min(1, dt * (this.state === 'attack' ? 4 : 10));
       }
     }
+    if (this.flash > 0 || this.flashOn) {
+      this.flash = Math.max(0, (this.flash || 0) - dt);
+      const k = this.flash / 0.16;
+      for (const m of this.mats) m.emissive.setRGB(0.9 * k, 0.25 * k, 0.18 * k);
+      this.flashOn = this.flash > 0;
+    }
     this.root.position.copy(this.pos);
     this.root.rotation.y = this.yaw;
     this.updateTrail();
@@ -732,39 +756,79 @@ class Fighter {
   }
   updateTrail() {
     const bw = this.bladeWorld(); if (!bw) return;
-    const swinging = this.state === 'attack' && this.frame() >= ATK[this.atk.type].a0 - 3 && this.frame() <= ATK[this.atk.type].a1 + 3;
-    if (swinging) { this.trailPts.unshift(bw); if (this.trailPts.length > 14) this.trailPts.pop(); }
-    else if (this.trailPts.length) this.trailPts.pop();
+    const A = this.state === 'attack' ? ATK[this.atk.type] : null;
+    const swinging = A && this.frame() >= A.a0 - 2.5 && this.frame() <= A.a1 + 4;
+    if (swinging) { this.trailPts.unshift(bw); if (this.trailPts.length > 12) this.trailPts.pop(); }
+    else if (this.trailPts.length) { this.trailPts.pop(); if (this.trailPts.length) this.trailPts.pop(); }
     writeTrail(this.trail, this.trailPts);
   }
 }
 
+const TRAIL_N = 48;
 function makeTrail(color) {
-  const N = 14, geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(N * 2 * 3), 3));
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(N * 2 * 4), 4));
-  const idx = []; for (let i = 0; i < N - 1; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(TRAIL_N * 3 * 3), 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(TRAIL_N * 3 * 4), 4));
+  const idx = [];
+  for (let i = 0; i < TRAIL_N - 1; i++) for (let j = 0; j < 2; j++) {
+    const a = i * 3 + j, b = a + 3;
+    idx.push(a, a + 1, b, a + 1, b + 1, b);
+  }
   geo.setIndex(idx);
   const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending }));
   m.frustumCulled = false; m.userData.color = new THREE.Color(color); scene.add(m);
   return m;
 }
+const _crA = new THREE.CatmullRomCurve3([new THREE.Vector3(), new THREE.Vector3()]);
+const _crB = new THREE.CatmullRomCurve3([new THREE.Vector3(), new THREE.Vector3()]);
 function writeTrail(m, pts) {
   const pos = m.geometry.attributes.position, col = m.geometry.attributes.color, c = m.userData.color;
-  for (let i = 0; i < 14; i++) {
-    const p = pts[Math.min(i, pts.length - 1)];
-    const a = pts.length > 1 && i < pts.length ? (1 - i / pts.length) * 0.32 : 0;
-    for (let j = 0; j < 2; j++) {
-      const v = p ? (j ? p[1] : p[1].clone().lerp(p[0], 0.4)) : new THREE.Vector3();
-      pos.setXYZ(i * 2 + j, v.x, v.y, v.z);
-      col.setXYZW(i * 2 + j, c.r, c.g, c.b, a * (j ? 1 : 0.15));
-    }
+  const n = pts.length;
+  if (n < 2) { col.array.fill(0); col.needsUpdate = true; return; }
+  _crA.points = pts.map((p) => p[1]);                      // 切先の軌跡
+  _crB.points = pts.map((p) => p[1].clone().lerp(p[0], 0.62));  // 刀身の中ほど
+  const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
+  for (let i = 0; i < TRAIL_N; i++) {
+    const t = i / (TRAIL_N - 1);
+    _crA.getPoint(t, tmpA); _crB.getPoint(t, tmpB);
+    const fade = Math.pow(1 - t, 1.6);
+    const outer = tmpA.clone().addScaledVector(tmpA.clone().sub(tmpB), 0.08);
+    [tmpB, tmpA, outer].forEach((v, j) => {
+      pos.setXYZ(i * 3 + j, v.x, v.y, v.z);
+      const w = j === 1 ? 1 : 0;                              // 切先側を一番明るく
+      const a = fade * (j === 1 ? 0.9 : j === 0 ? 0.0 : 0.0);
+      col.setXYZW(i * 3 + j, c.r * (0.6 + w * 0.4), c.g * (0.6 + w * 0.4), c.b * (0.6 + w * 0.4), a);
+    });
   }
   pos.needsUpdate = col.needsUpdate = true;
 }
 
+// 斬撃の閃き(当たった瞬間の一筋の光)
+const slashes = [];
+function slashFx(at, dir, color = '#fff6e0') {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+  m.position.copy(at);
+  m.lookAt(camera.position);
+  const d = dir.clone().project(camera).sub(at.clone().project(camera));
+  m.rotateZ(Math.atan2(d.y, d.x * camera.aspect));
+  scene.add(m); slashes.push({ m, t: 0 });
+}
+function updateSlashes(dt) {
+  for (let i = slashes.length - 1; i >= 0; i--) {
+    const s = slashes[i]; s.t += dt;
+    const k = s.t / 0.22;
+    s.m.scale.set(0.4 + k * 2.6, 0.05 * (1 - k) + 0.005, 1);
+    s.m.material.opacity = 1 - k;
+    if (k >= 1) { scene.remove(s.m); s.m.geometry.dispose(); s.m.material.dispose(); slashes.splice(i, 1); }
+  }
+}
+
 // ------------------------------------------------------------------ combat resolution
-let hitStop = 0, shake = 0, slowmo = 1;
+let hitStop = 0, shake = 0, slowmo = 1, kick = 0, fovPunch = 0;
+function flash(a) {
+  const el = $('flash'); el.style.transition = 'none'; el.style.opacity = a;
+  requestAnimationFrame(() => { el.style.transition = 'opacity .22s ease-out'; el.style.opacity = 0; });
+}
 function resolve(att, def) {
   if (!att.inActive() || att.atk.hit || def.state === 'dead') return;
   const A = ATK[att.atk.type];
@@ -780,7 +844,8 @@ function resolve(att, def) {
     const [, ta] = att.bladeWorld(), [, tb] = def.bladeWorld();
     const mid = ta.clone().lerp(tb, 0.5);
     burst(mid, 26, '#ffd27a', 6, 0.025, 0.45, -6);
-    sfx('clash'); hitStop = 0.12; shake = 0.25;
+    sfx('clash'); hitStop = 0.14; shake = 0.35; flash(0.2);
+    slashFx(mid, mid.clone().add(new THREE.Vector3(0, 1, 0)), '#ffd27a');
     att.knock = att.forward().multiplyScalar(-2.4); def.knock = def.forward().multiplyScalar(-2.4);
     pop('鍔迫り', mid, 'dodge');
     return;
@@ -789,12 +854,21 @@ function resolve(att, def) {
   if (A.horiz && def.ducking) { pop('かわした', headPos, 'dodge'); return; }
   let dmg = A.dmg * att.power;
   let word = A.name;
+  const now = performance.now() / 1000;
+  att.combo = now - (att.lastHit || 0) < 1.6 ? (att.combo || 1) + 1 : 1;
+  att.lastHit = now;
+  if (att.combo > 1) { dmg *= 1 + 0.15 * (att.combo - 1); word = ['', '', '二連', '三連', '四連', '五連'][Math.min(att.combo, 5)] + ' ' + A.name; }
   if (def.inWindup()) { dmg *= 1.3; word = '出端 ' + A.name; }
   def.takeHit(Math.round(dmg), att);
-  const bw = att.bladeWorld(); const at = bw ? bw[1].lerp(headPos, 0.5) : headPos;
-  burst(at, 18, '#9e1b14', 4.5, 0.03, 0.6);
-  burst(at, 8, '#fff2d8', 6, 0.015, 0.25, 0);
-  sfx('hit'); hitStop = 0.09; shake = 0.35;
+  const bw = att.bladeWorld(); const at = bw ? bw[1].lerp(headPos, 0.45) : headPos;
+  at.y = Math.max(at.y, def.pos.y + 0.8);
+  const swingDir = att.trailPts.length > 1 ? att.trailPts[0][1].clone().sub(att.trailPts[1][1]) : new THREE.Vector3(1, -1, 0);
+  slashFx(at, at.clone().add(swingDir));
+  burst(at, 22, '#9e1b14', 5, 0.03, 0.6);
+  burst(at, 12, '#fff2d8', 7, 0.015, 0.25, 0);
+  sfx('hit', A.pitch); hitStop = A.stop * (def.state === 'dead' ? 2.5 : 1); shake = A === ATK.over ? 0.6 : 0.42;
+  flash(att.isPlayer ? 0.28 : 0.18);
+  fovPunch = A === ATK.over ? 6 : 4;
   pop(word, headPos, 'hit');
   updateBars();
 }
@@ -966,6 +1040,12 @@ function updateCamera(dt) {
   camPos.lerp(wantPos, k); camLook.lerp(wantLook, k);
   camera.position.copy(camPos);
   if (shake > 0) { camera.position.add(new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1)).multiplyScalar(shake * 0.06)); shake = Math.max(0, shake - dt * 1.6); }
+  if (kick > 0) {   // 自分の太刀に合わせて視点がわずかに前へ
+    camera.position.lerp(camLook, 0.06 * kick); kick = Math.max(0, kick - dt * 5);
+  }
+  fovPunch = Math.max(0, fovPunch - dt * 30);
+  const fov = 42 - fovPunch;
+  if (Math.abs(camera.fov - fov) > 0.01) { camera.fov = fov; camera.updateProjectionMatrix(); }
   camera.lookAt(camLook);
   const focus = game === 'fight' ? p : mid;
   sun.position.copy(focus).addScaledVector(sunDir, 30); sun.target.position.copy(focus);
@@ -1012,7 +1092,7 @@ loadModel().then((gltf) => {
   });
   // 武蔵の木刀には鍔も柄巻きもない:柄を素木に
   player.root.traverse((o) => { if (o.isMesh && /^Katana_(Tsuka|Kashira)/.test(o.name)) { o.visible = true; o.material.color.set('#7a5434'); } });
-  player.foe = enemy; enemy.foe = player;
+  player.foe = enemy; enemy.foe = player; player.isPlayer = true;
   player.onAttack = (t) => aiOnPlayerAttack(t);
   player.onDeath = () => endRound(false);
   enemy.onDeath = () => endRound(true);
@@ -1032,7 +1112,7 @@ $('again').addEventListener('click', () => { $('result').hidden = true; begin();
 
 function reset(f, start) {
   f.pos.set(...start); f.hp = 100; f.state = 'idle'; f.queued = null; f.knock = null; f.trailPts.length = 0;
-  f.mixer.stopAllAction(); f.cur = null; f.play('Idle', { fade: 0 });
+  f.mixer.stopAllAction(); f.cur = null; f.play('Idle', { fade: 0 }); f.combo = 0;
 }
 function begin() {
   reset(player, player.opts.start); reset(enemy, enemy.opts.start); updateBars();
@@ -1080,6 +1160,7 @@ function tick() {
     enemy.update(gdt, player, em);
     if (game === 'fight') { resolve(player, enemy); resolve(enemy, player); }
     updateParts(gdt);
+    updateSlashes(dt);
     updatePops(dt);
     updateCamera(dt);
   } else {
