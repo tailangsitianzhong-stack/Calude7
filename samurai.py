@@ -10,7 +10,9 @@
 ポーズは 2 種類:
   fan    … 右手に扇を掲げ、刀は腰に差したまま  → samurai.blend / samurai_preview.png
   katana … 抜刀して両手で中段に構える          → samurai_katana.blend / samurai_katana_preview.png
-GUI では下の POSE を書き換えて実行。コマンドラインでは
+  anim   … リグ+モーション(袈裟斬り/振り下ろし/横斬り/歩き/走り/しゃがみ/回避)
+           → samurai_anim.blend と motions/ フォルダの GIF
+GUI では下の POSE を書き換えて実行("anim" も可)。コマンドラインでは
   blender --background --python samurai.py -- katana   (省略時は両方を生成)
 """
 import bpy
@@ -356,7 +358,7 @@ def set_pose(pose):
     (R_SH, R_EL, R_WR), (L_SH, L_EL, L_WR) = ARMS[pose]["R"], ARMS[pose]["L"]
 
 
-set_pose(POSE)
+set_pose(POSE if POSE in ARMS else "katana")
 
 
 def build_body(coll):
@@ -995,10 +997,387 @@ def build_scene(coll):
     world.node_tree.nodes["Background"].inputs["Strength"].default_value = 0.5
 
 
+# ---------------------------------------------------------------- rig & animation
+from mathutils import Matrix, Quaternion, Euler
+
+RIG = None
+DEFORM = {  # 変形メッシュ → 影響ボーン
+    "Arm_Mail.R": ["chest", "upper_arm.R", "forearm.R"], "Arm_Mail.L": ["chest", "upper_arm.L", "forearm.L"],
+    "Hand.R": ["forearm.R", "hand.R"], "Hand.L": ["forearm.L", "hand.L"],
+    "Leg.R": ["hips", "thigh.R", "shin.R"], "Leg.L": ["hips", "thigh.L", "shin.L"],
+    "Tabi.R": ["shin.R", "foot.R"], "Tabi.L": ["shin.L", "foot.L"],
+    "Head": ["neck", "head"],
+    "Torso_Under": ["hips", "spine", "chest", "neck", "thigh.L", "thigh.R"],
+    "Jinbaori": ["hips", "spine", "chest", "thigh.L", "thigh.R"],
+}
+RIGID = [  # 名前の先頭 → 追従ボーン(該当なしは最寄りのボーン)
+    ("Kusazuri", "hips"), ("Obi", "hips"), ("Katana", "hips"), ("Wakizashi", "hips"),
+    ("Do_", "spine"), ("Nodowa", "chest"), ("Cord_", "chest"), ("Knot_Chest", "chest"), ("Tassel", "chest"),
+    ("Shinobi_no_o", "head"), ("Knot_Chin", "head"), ("Hair_", "head"), ("Chonmage", "head"),
+    ("Eye.", "head"), ("Brow.", "head"),
+]
+SWORD_PARTS = ("Katana_Blade", "Katana_Habaki", "Katana_Seppa", "Katana_Tsuba", "Katana_Fuchi",
+               "Katana_Tsuka", "Katana_Kashira", "Katana_Hishi")
+
+
+def _sword_frame(u, hint):
+    y = Vector(u).normalized()
+    e = Vector(hint) - y * Vector(hint).dot(y)
+    z = -e.normalized()
+    x = y.cross(z).normalized()
+    return x, y, z
+
+
+def build_rig(colls):
+    """人型アーマチュア:腕は刀に付けた IK ターゲット、脚は足 IK で制御"""
+    global RIG
+    arm_data = bpy.data.armatures.new("Samurai_Rig")
+    arm = bpy.data.objects.new("Samurai_Rig", arm_data)
+    colls[0].objects.link(arm)
+    arm.show_in_front = True
+    bpy.ops.object.select_all(action="DESELECT")
+    bpy.context.view_layer.objects.active = arm
+    arm.select_set(True)
+    bpy.ops.object.mode_set(mode="EDIT")
+    eb = arm_data.edit_bones
+
+    def bone(name, head, tail, parent=None, connect=False, deform=True, roll_to=None):
+        b = eb.new(name)
+        b.head, b.tail = Vector(head), Vector(tail)
+        if parent:
+            b.parent = eb[parent]
+            b.use_connect = connect
+        b.use_deform = deform
+        if roll_to is not None:
+            b.align_roll(Vector(roll_to))
+        return b
+
+    bone("root", (0, 0, 0), (0, 0.3, 0), deform=False)
+    bone("hips", (0, 0, 0.93), (0, 0, 1.06), "root")
+    bone("spine", (0, 0, 1.06), (0, 0, 1.26), "hips", True)
+    bone("chest", (0, 0, 1.26), (0, 0, 1.45), "spine", True)
+    bone("neck", (0, 0.005, 1.45), (0, 0.005, 1.53), "chest")
+    bone("head", (0, 0.005, 1.53), (0, 0.005, 1.76), "neck", True)
+    for side, (sh, el, wr) in (("R", (R_SH, R_EL, R_WR)), ("L", (L_SH, L_EL, L_WR))):
+        d = (Vector(wr) - Vector(el)).normalized()
+        bone(f"upper_arm.{side}", sh, el, "chest")
+        bone(f"forearm.{side}", el, wr, f"upper_arm.{side}", True)
+        h = bone(f"hand.{side}", wr, Vector(wr) + d * 0.1, f"forearm.{side}", True)
+        s = -1 if side == "R" else 1
+        hp = (s * 0.10, 0.0, H["crotch"] + 0.05)
+        kn = (s * 0.15, -0.02, H["knee"])
+        an = (s * 0.18, 0.01, H["ankle"] + 0.02)
+        bone(f"thigh.{side}", hp, kn, "hips")
+        bone(f"shin.{side}", kn, an, f"thigh.{side}", True)
+        bone(f"foot.{side}", an, (an[0] + s * 0.03, -0.14, 0.03), f"shin.{side}", True)
+    u = SWORD_DIR
+    x, y, z = _sword_frame(u, (0, 0, -1))
+    base = GRIP - u * 0.03
+    bone("sword", base, base + u * 0.25, "root", deform=False, roll_to=z)
+    for side in ("R", "L"):
+        h, f = eb[f"hand.{side}"], eb[f"foot.{side}"]
+        ik = bone(f"ik_hand.{side}", h.head, h.tail, "sword", deform=False)
+        ik.roll = h.roll
+        ik = bone(f"ik_foot.{side}", f.head, f.tail, "root", deform=False)
+        ik.roll = f.roll
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    for side in ("R", "L"):
+        pb = arm.pose.bones
+        c = pb[f"forearm.{side}"].constraints.new("IK")
+        c.target, c.subtarget, c.chain_count = arm, f"ik_hand.{side}", 2
+        c = pb[f"hand.{side}"].constraints.new("COPY_ROTATION")
+        c.target, c.subtarget = arm, f"ik_hand.{side}"
+        c = pb[f"shin.{side}"].constraints.new("IK")
+        c.target, c.subtarget, c.chain_count = arm, f"ik_foot.{side}", 2
+        c = pb[f"foot.{side}"].constraints.new("COPY_ROTATION")
+        c.target, c.subtarget = arm, f"ik_foot.{side}"
+    RIG = arm
+
+    # カーブ(紐・縁取り)をメッシュ化して変形できるように
+    objs = [o for c in colls for o in c.objects]
+    curves = [o for o in objs if o.type == "CURVE"]
+    if curves:
+        bpy.ops.object.select_all(action="DESELECT")
+        for o in curves:
+            o.select_set(True)
+        bpy.context.view_layer.objects.active = curves[0]
+        bpy.ops.object.convert(target="MESH")
+    bpy.context.view_layer.update()
+
+    bones = {b.name: (b.head_local.copy(), b.tail_local.copy()) for b in arm_data.bones if b.use_deform}
+
+    def seg_dist(p, a, b):
+        ab = b - a
+        t = max(0.0, min(1.0, (p - a).dot(ab) / ab.length_squared))
+        return (p - (a + ab * t)).length
+
+    def nearest(p, names=None):
+        return min((n for n in bones if names is None or n in names), key=lambda n: seg_dist(p, *bones[n]))
+
+    for o in [o for c in colls for o in c.objects]:
+        if o is arm or o.type not in ("MESH", "EMPTY") or o.parent is not None:
+            continue
+        mw = o.matrix_world.copy()
+        key = next((k for k in DEFORM if o.name == k or (k == "Jinbaori" and o.name.startswith(k))), None)
+        if key and o.type == "MESH":
+            names = DEFORM[key]
+            groups = {n: o.vertex_groups.new(name=n) for n in names}
+            for v in o.data.vertices:
+                p = mw @ v.co
+                ws = sorted(((1.0 / (seg_dist(p, *bones[n]) ** 4 + 1e-9), n) for n in names), reverse=True)[:2]
+                tot = sum(w for w, _ in ws)
+                for w, n in ws:
+                    groups[n].add([v.index], w / tot, "REPLACE")
+            m = o.modifiers.new("Armature", "ARMATURE")
+            m.object = arm
+            bpy.context.view_layer.objects.active = o
+            bpy.ops.object.modifier_move_to_index(modifier=m.name, index=0)
+            o.parent = arm
+            o.matrix_world = mw
+            continue
+        if o.name.startswith(SWORD_PARTS):
+            bname = "sword"
+        elif o.users_collection[0].name == "Samurai_Kabuto":
+            bname = "head"
+        else:
+            bname = next((b for pre, b in RIGID if o.name.startswith(pre)), None)
+            if bname is None:
+                if o.type == "MESH" and o.data.vertices:
+                    c = sum((mw @ v.co for v in o.data.vertices), Vector()) / len(o.data.vertices)
+                else:
+                    c = mw.translation
+                bname = nearest(c)
+        o.parent = arm
+        o.parent_type = "BONE"
+        o.parent_bone = bname
+        bpy.context.view_layer.update()
+        o.matrix_world = mw
+    return arm
+
+
+def _fcurves(action):
+    for layer in getattr(action, "layers", []):
+        for strip in layer.strips:
+            for cb in strip.channelbags:
+                yield from cb.fcurves
+
+
+CHUDAN = dict(P=GRIP - SWORD_DIR * 0.03, u=SWORD_DIR, hint=(0, 0, -1))
+
+
+def pose_rig(arm, hips=(0, 0, 0), hips_rot=(0, 0, 0), spine=(0, 0, 0), chest=(0, 0, 0), neck=(0, 0, 0),
+             sword=None, foot_L=(0, 0, 0), foot_R=(0, 0, 0), sword_follow=True):
+    """アーマチュア空間の角度(度)/オフセット(m)でポーズを設定。各回転は親に対する相対"""
+    pb = arm.pose.bones
+    for b in pb:
+        b.rotation_mode = "QUATERNION"
+        b.location = (0, 0, 0)
+        b.rotation_quaternion = (1, 0, 0, 0)
+
+    def rel(name, deg):
+        R = Euler([math.radians(a) for a in deg]).to_quaternion()
+        Mr = arm.data.bones[name].matrix_local.to_quaternion()
+        pb[name].rotation_quaternion = Mr.inverted() @ R @ Mr
+
+    hb = arm.data.bones["hips"]
+    R = Euler([math.radians(a) for a in hips_rot]).to_matrix().to_4x4()
+    h = hb.head_local
+    pb["hips"].matrix = Matrix.Translation(Vector(hips) + h) @ R @ Matrix.Translation(-h) @ hb.matrix_local
+    rel("spine", spine)
+    rel("chest", chest)
+    rel("neck", neck)
+    for side, off in (("L", foot_L), ("R", foot_R)):
+        fb = arm.data.bones[f"ik_foot.{side}"]
+        pb[f"ik_foot.{side}"].matrix = Matrix.Translation(Vector(off)) @ fb.matrix_local
+    s = dict(CHUDAN, **(sword or {}))
+    x, y, z = _sword_frame(s["u"], s["hint"])
+    P = Vector(s["P"]) + (Vector(hips) if sword_follow else Vector())
+    M = Matrix((x, y, z)).transposed().to_4x4()
+    M.translation = P
+    pb["sword"].matrix = M
+
+
+def key_rig(arm, frame, **pose):
+    pose_rig(arm, **pose)
+    for name in ("hips", "spine", "chest", "neck", "sword", "ik_foot.L", "ik_foot.R"):
+        b = arm.pose.bones[name]
+        b.keyframe_insert("location", frame=frame)
+        b.keyframe_insert("rotation_quaternion", frame=frame)
+
+
+def new_action(arm, name, keys, cyclic=False):
+    act = bpy.data.actions.new(name)
+    act.use_fake_user = True
+    arm.animation_data_create()
+    arm.animation_data.action = act
+    for f, pose in keys:
+        key_rig(arm, f, **pose)
+    if cyclic:
+        for fc in _fcurves(act):
+            fc.modifiers.new("CYCLES")
+    act.frame_range = (keys[0][0], keys[-1][0])
+    return act
+
+
+def S(P, u, hint):
+    return dict(P=Vector(P), u=Vector(u), hint=Vector(hint))
+
+
+def build_actions(arm):
+    C = CHUDAN
+    P0 = Vector(C["P"])
+    acts = []
+    # --- 袈裟斬り(右上から左下への斜め斬り)
+    acts.append(new_action(arm, "Slash_Diagonal", [
+        (0, dict()),
+        (10, dict(sword=S((-0.24, -0.10, 1.48), (-0.45, 0.35, 0.82), (0.5, -0.7, -0.3)),
+                  hips_rot=(0, 0, -10), chest=(0, 0, -18), spine=(-4, 0, -6))),
+        (13, dict(sword=S((-0.16, -0.26, 1.42), (-0.1, -0.35, 0.93), (0.6, -0.7, -0.2)),
+                  hips_rot=(0, 0, -5), chest=(0, 0, -10), foot_R=(0, -0.06, 0.05))),
+        (17, dict(sword=S((-0.02, -0.38, 1.22), (0.45, -0.82, 0.35), (0.6, -0.1, -0.8)),
+                  hips=(0, -0.05, -0.05), hips_rot=(0, 0, 8), chest=(8, 0, 10), spine=(6, 0, 0),
+                  foot_R=(0, -0.14, 0))),
+        (23, dict(sword=S((0.16, -0.26, 0.98), (0.75, -0.35, -0.55), (0.2, 0.4, -0.9)),
+                  hips=(0, -0.06, -0.07), hips_rot=(0, 0, 15), chest=(12, 0, 18), spine=(8, 0, 6),
+                  foot_R=(0, -0.14, 0))),
+        (30, dict(sword=S((0.14, -0.26, 1.0), (0.7, -0.45, -0.45), (0.2, 0.4, -0.9)),
+                  hips=(0, -0.06, -0.07), hips_rot=(0, 0, 15), chest=(10, 0, 16), spine=(8, 0, 6),
+                  foot_R=(0, -0.14, 0))),
+        (44, dict()),
+    ]))
+    # --- 振り下ろし(上段からの真っ向斬り)
+    acts.append(new_action(arm, "Slash_Overhead", [
+        (0, dict()),
+        (10, dict(sword=S((0, -0.15, 1.58), (0, 0.40, 0.92), (0, -1, 0)), spine=(-6, 0, 0), neck=(-4, 0, 0))),
+        (13, dict(sword=S((0, -0.22, 1.60), (0, -0.2, 0.98), (0, -1, 0)), spine=(-2, 0, 0),
+                  foot_R=(0, -0.07, 0.06))),
+        (16, dict(sword=S((0, -0.36, 1.10), (0, -0.97, -0.22), (0, 0, -1)), hips=(0, -0.05, -0.06),
+                  spine=(14, 0, 0), chest=(4, 0, 0), foot_R=(0, -0.16, 0))),
+        (22, dict(sword=S((0, -0.33, 0.95), (0, -0.75, -0.66), (0, 0.3, -1)), hips=(0, -0.06, -0.08),
+                  spine=(20, 0, 0), chest=(4, 0, 0), foot_R=(0, -0.16, 0))),
+        (30, dict(sword=S((0, -0.33, 0.97), (0, -0.78, -0.62), (0, 0.3, -1)), hips=(0, -0.06, -0.08),
+                  spine=(18, 0, 0), chest=(4, 0, 0), foot_R=(0, -0.16, 0))),
+        (44, dict()),
+    ]))
+    # --- 横斬り(右から左への水平斬り)
+    acts.append(new_action(arm, "Slash_Horizontal", [
+        (0, dict()),
+        (10, dict(sword=S((-0.22, -0.12, 1.18), (-0.55, 0.55, 0.62), (0.4, -0.9, 0)),
+                  hips_rot=(0, 0, -14), chest=(0, 0, -22), spine=(0, 0, -8))),
+        (17, dict(sword=S((0.0, -0.36, 1.12), (-0.25, -0.95, 0.08), (1, 0, 0)), hips=(0, -0.03, -0.05),
+                  hips_rot=(0, 0, 0), chest=(4, 0, 0), foot_R=(0, -0.10, 0))),
+        (23, dict(sword=S((0.22, -0.22, 1.12), (0.85, -0.45, 0.05), (0.4, 0.9, 0)), hips=(0, -0.03, -0.06),
+                  hips_rot=(0, 0, 16), chest=(4, 0, 24), spine=(0, 0, 8), foot_R=(0, -0.10, 0))),
+        (30, dict(sword=S((0.22, -0.2, 1.1), (0.85, -0.4, 0.0), (0.4, 0.9, 0)), hips=(0, -0.03, -0.06),
+                  hips_rot=(0, 0, 16), chest=(4, 0, 22), spine=(0, 0, 8), foot_R=(0, -0.10, 0))),
+        (44, dict()),
+    ]))
+
+    # --- 歩き / 走り(その場ループ)
+    def gait(name, length, step, stride, lift, bob, base_z, lean, sw):
+        keys = []
+        for f in range(0, length + 1, step):
+            ph = 2 * math.pi * f / length
+            fl = (0, -stride * math.cos(ph), lift * max(0.0, -math.sin(ph)))
+            fr = (0, stride * math.cos(ph), lift * max(0.0, math.sin(ph)))
+            hips = (0.02 * math.sin(ph), 0, base_z - bob * math.cos(2 * ph))
+            keys.append((f, dict(hips=hips, hips_rot=(0, 0, 6 * math.cos(ph)), spine=(lean, 0, 0),
+                                 chest=(0, 0, -5 * math.cos(ph)), neck=(-lean * 0.6, 0, 0),
+                                 foot_L=fl, foot_R=fr,
+                                 sword=S(P0 + Vector(sw) + Vector((0, 0, 0.012 * math.cos(2 * ph))),
+                                         C["u"], C["hint"]))))
+        return new_action(arm, name, keys, cyclic=True)
+    acts.append(gait("Walk", 32, 4, 0.14, 0.07, 0.015, -0.03, 3, (0, 0, 0)))
+    acts.append(gait("Run", 20, 2, 0.26, 0.16, 0.03, -0.08, 14, (0, -0.06, -0.06)))
+
+    # --- しゃがみ
+    low = dict(hips=(0, 0.07, -0.36), spine=(26, 0, 0), chest=(4, 0, 0), neck=(-22, 0, 0),
+               sword=S(P0 + Vector((0, -0.10, -0.20)), (0, -0.62, 0.78), (0, 0, -1)))
+    acts.append(new_action(arm, "Crouch", [(0, dict()), (10, low), (30, low), (42, dict())]))
+
+    # --- 回避(右へのサイドステップ)
+    acts.append(new_action(arm, "Dodge", [
+        (0, dict()),
+        (5, dict(hips=(0, 0, -0.08), spine=(6, 0, 0))),
+        (9, dict(hips=(-0.25, 0, -0.10), spine=(6, -10, 0), foot_R=(-0.30, 0, 0.12))),
+        (13, dict(hips=(-0.45, 0.05, -0.16), hips_rot=(0, -6, 0), spine=(10, -14, 0), neck=(0, 10, 0),
+                  foot_R=(-0.55, 0, 0))),
+        (17, dict(hips=(-0.48, 0.05, -0.14), hips_rot=(0, -4, 0), spine=(8, -8, 0), neck=(0, 6, 0),
+                  foot_R=(-0.55, 0, 0), foot_L=(-0.30, 0, 0.08))),
+        (22, dict(hips=(-0.45, 0.03, -0.10), spine=(6, -2, 0), foot_R=(-0.55, 0, 0), foot_L=(-0.38, 0, 0))),
+        (30, dict(hips=(-0.45, 0, -0.04), foot_R=(-0.55, 0, 0), foot_L=(-0.38, 0, 0))),
+        (36, dict(hips=(-0.22, 0, -0.06), foot_R=(-0.55, 0, 0), foot_L=(-0.10, 0, 0.08))),
+        (42, dict(hips=(0, 0, -0.04), foot_R=(-0.20, 0, 0.08), foot_L=(0, 0, 0))),
+        (48, dict()),
+    ]))
+    arm.animation_data.action = acts[0]
+    scene = bpy.context.scene
+    scene.render.fps = 30
+    scene.frame_start, scene.frame_end = 0, 44
+    pose_rig(arm)
+    return acts
+
+
+def assign_action(arm, act):
+    arm.animation_data.action = act
+    try:
+        if not arm.animation_data.action_slot and act.slots:
+            arm.animation_data.action_slot = act.slots[0]
+    except AttributeError:
+        pass
+    bpy.context.scene.frame_start, bpy.context.scene.frame_end = map(int, act.frame_range)
+
+
+def render_motion_previews(arm, acts, out_dir):
+    """各モーションを低解像度で書き出し、GIF とコマ割りシートを作る"""
+    scene = bpy.context.scene
+    scene.render.resolution_x, scene.render.resolution_y = 400, 500
+    scene.cycles.samples = int(os.environ.get("SAMURAI_ANIM_SAMPLES", 12))
+    scene.camera.data.dof.use_dof = False
+    frames_dir = os.path.join(out_dir, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    sheet_rows = []
+    for act in acts:
+        assign_action(arm, act)
+        a, b = map(int, act.frame_range)
+        step = 2 if act.name in ("Run",) else 3
+        files = []
+        for f in range(a, b + (0 if "Walk" in act.name or "Run" in act.name else 1), step):
+            scene.frame_set(f)
+            fp = os.path.join(frames_dir, f"{act.name}_{f:03d}.png")
+            scene.render.filepath = fp
+            bpy.ops.render.render(write_still=True)
+            files.append(fp)
+        print(f"[samurai] rendered {len(files)} frames of {act.name}")
+        sheet_rows.append((act.name, files))
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        print("[samurai] PIL not available; frames left in", frames_dir)
+        return
+    for name, files in sheet_rows:
+        ims = [Image.open(f).convert("RGB") for f in files]
+        dur = int(1000 / 30 * (2 if name == "Run" else 3))
+        ims[0].save(os.path.join(out_dir, f"{name}.gif"), save_all=True, append_images=ims[1:],
+                    duration=dur, loop=0)
+    cols = 6
+    tw, th = 200, 250
+    sheet = Image.new("RGB", (cols * tw + 150, len(sheet_rows) * th), (235, 230, 222))
+    d = ImageDraw.Draw(sheet)
+    for r, (name, files) in enumerate(sheet_rows):
+        idx = [round(i * (len(files) - 1) / (cols - 1)) for i in range(cols)]
+        for c, i in enumerate(idx):
+            sheet.paste(Image.open(files[i]).convert("RGB").resize((tw, th)), (150 + c * tw, r * th))
+        d.text((10, r * th + th // 2), name, fill=(40, 30, 20))
+    sheet.save(os.path.join(out_dir, "motions_sheet.png"))
+
+
 def main(pose=None):
+    anim = pose == "anim"
     if pose:
-        set_pose(pose)
-    suffix = "" if POSE == "fan" else "_" + POSE
+        set_pose("katana" if anim else pose)
+    suffix = "_anim" if anim else ("" if POSE == "fan" else "_" + POSE)
     clear_scene()
     build_materials()
     c_body = collection("Samurai_Body")
@@ -1011,6 +1390,10 @@ def main(pose=None):
     build_kabuto(c_kabuto)
     build_katana(c_weap)
     build_scene(c_scene)
+    if anim:
+        arm = build_rig([c_body, c_armor, c_kabuto, c_weap])
+        acts = build_actions(arm)
+        assign_action(arm, acts[0])
 
     # 身長チェック(足裏〜頭頂: 髪・頭部のみで計測)
     dg = bpy.context.evaluated_depsgraph_get()
@@ -1022,6 +1405,14 @@ def main(pose=None):
     blend = os.path.join(OUT_DIR, f"samurai{suffix}.blend")
     bpy.ops.wm.save_as_mainfile(filepath=blend)
     print(f"[samurai] saved {blend}")
+    if anim:
+        if bpy.app.background and os.environ.get("SAMURAI_NO_RENDER") != "1":
+            scene = bpy.context.scene
+            scene.render.engine = "CYCLES"
+            scene.cycles.device = "CPU"
+            scene.cycles.use_denoising = True
+            render_motion_previews(arm, acts, os.path.join(OUT_DIR, "motions"))
+        return
 
     if bpy.app.background:
         scene = bpy.context.scene
@@ -1050,7 +1441,7 @@ if __name__ == "__main__":
     import sys
     args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     if not bpy.app.background:
-        main(POSE)                       # GUI: POSE で指定したポーズ
+        main(POSE)                       # GUI: POSE で指定したポーズ("anim" も可)
     else:
-        for p in (args or ["fan", "katana"]):
+        for p in (args or ["fan", "katana", "anim"]):
             main(p)
